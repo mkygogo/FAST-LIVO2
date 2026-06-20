@@ -1,0 +1,18 @@
+[Unit]
+Description=JR scanner touch browser console
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jr
+Group=jr
+SupplementaryGroups=docker
+WorkingDirectory=/home/jr/fast_livo2_deploy/console
+ExecStart=/usr/bin/python3 /home/jr/fast_livo2_deploy/console/server.py
+Restart=on-failure
+RestartSec=2
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

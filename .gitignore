@@ -1,2 +1,24 @@
-Log/*
-build/*
+# Python/runtime artifacts
+__pycache__/
+*.py[cod]
+
+# ROS/catkin build output
+build/
+devel/
+install/
+log/
+.catkin_tools/
+
+# Runtime data
+*.bag
+*.db3
+*.pcd
+*.log
+fast_livo2_data/
+
+# Local editor/system files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+

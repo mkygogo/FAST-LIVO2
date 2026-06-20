@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=JR扫描仪控制台
+Comment=Open the local JR scanner touch console
+Exec=firefox http://localhost:8090
+Icon=applications-engineering
+Terminal=false
+Categories=Development;Science;
