@@ -28,6 +28,7 @@ fast_livo2_console/
     index.html                      Touch UI
     style.css                       Touch UI layout and canvas controls
     app.js                          Frontend status, control, and point rendering
+    map_viewer.html                 Offline PCD/PLY map viewer (served by map_viewer_server.py)
   scripts/
     launch_fast_lio_mid360.sh       Start FAST_LIO LiDAR-only mapping container
     stop_lidar_mapping.sh           Stop FAST_LIO mapping container
@@ -36,6 +37,7 @@ fast_livo2_console/
     build_livox_power_control.sh    Build Livox SDK power-control helper
   tools/
     livox_power_control.cpp         Livox SDK2 helper for wake/idle control
+    map_viewer_server.py            Standalone HTTP server for offline PCD/PLY viewing
   patches/
     fast_lio_livox_ros_driver2.patch
                                     Patch for mkygogo/FAST_LIO integration
@@ -48,13 +50,25 @@ fast_livo2_console/
 The current deployed mini PC uses these directories:
 
 ```text
-/home/jr/fast_livo2_deploy/console   Deployed browser console
+/home/jr/fast_livo2_deploy/console   Deployed browser console (server.py, static/)
+/home/jr/fast_livo2_deploy/map_viewer Map viewer server and its HTML
 /home/jr/fast_livo2_deploy           Docker compose deployment root
 /home/jr/fast_livo2_ws               ROS catkin workspace
 /home/jr/fast_livo2_data/bags        Rosbag storage
 /home/jr/fast_livo2_data/output      Logs and generated output
 /home/jr/fast_livo2_data/tools       Runtime helper binaries/scripts
 ```
+
+Map viewer deployment path (port 18180):
+
+```text
+/home/jr/fast_livo2_deploy/map_viewer/map_viewer_server.py
+/home/jr/fast_livo2_deploy/map_viewer/map_viewer.html
+```
+
+The map viewer process uses `--viewer` pointing to the HTML in the same directory.
+When deploying a new `map_viewer.html`, copy to the `map_viewer/` directory, not
+`console/static/`.
 
 Systemd service:
 
@@ -218,4 +232,43 @@ Before uploading:
    directories, and helper binaries compiled on the mini PC.
 5. If the remote mini PC has newer files, copy them back into this repository
    before committing.
+
+## SSH Deployment from Dev Machine
+
+A dedicated SSH key is configured for non-interactive deployment:
+
+```text
+Key: ~/.ssh/jr_fast_livo2_ed25519
+Host: jr@192.168.3.59
+```
+
+Deploy map viewer:
+
+```bash
+scp -i ~/.ssh/jr_fast_livo2_ed25519 fast_livo2_console/static/map_viewer.html jr@192.168.3.59:/home/jr/fast_livo2_deploy/map_viewer/map_viewer.html
+```
+
+Deploy console:
+
+```bash
+scp -i ~/.ssh/jr_fast_livo2_ed25519 -r fast_livo2_console/ jr@192.168.3.59:/home/jr/fast_livo2_deploy/console/
+```
+
+No restart is needed for the map viewer (HTML is re-read on each request).
+For the main console, restart the service after deployment:
+
+```bash
+ssh -i ~/.ssh/jr_fast_livo2_ed25519 jr@192.168.3.59 sudo systemctl restart fast-livo2-console.service
+```
+
+## Map Viewer Features
+
+The offline map viewer (`map_viewer.html`) provides:
+
+- PCD and PLY file loading with automatic down-sampling to 180k points
+- View modes: top-down (俯视), front (前视), roam/FPS (漫游)
+- Manual 3-axis alignment (X/Y/Z rotation) to correct tilt in scanned maps
+- Alignment angle persisted in browser localStorage
+- Real-time FPS counter
+- Roam mode: WASD movement, Q/E vertical, mouse-look with pointer lock
 
