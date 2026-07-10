@@ -169,6 +169,130 @@ function showTab(id) {
   document.querySelectorAll(".page").forEach((page) => page.classList.toggle("active", page.id === id));
   if (id === "fastlivo") setTimeout(resizeThree, 60);
   if (id === "data") refreshDataMaps();
+  if (id === "camera") {
+    refreshCameraConfig();
+    ensureCameraStream();
+  }
+}
+
+function syncCameraControlOutputs() {
+  const exp = $("camExposure");
+  const fr = $("camFrameRate");
+  const gamma = $("camGamma");
+  const sat = $("camSaturation");
+  if (exp && $("camExposureValue")) $("camExposureValue").textContent = String(exp.value);
+  if (fr && $("camFrameRateValue")) $("camFrameRateValue").textContent = String(fr.value);
+  if (gamma && $("camGammaValue")) $("camGammaValue").textContent = Number(gamma.value).toFixed(2);
+  if (sat && $("camSaturationValue")) $("camSaturationValue").textContent = String(sat.value);
+}
+
+function readCameraFormParams() {
+  return {
+    ExposureTime: Number($("camExposure")?.value || 12000),
+    GainAuto: Number($("camGainAuto")?.value || 2),
+    FrameRate: Number($("camFrameRate")?.value || 10),
+    FrameRateEnable: Boolean($("camFrameRateEnable")?.checked),
+    Gamma: Number($("camGamma")?.value || 0.7),
+    GammaEnable: Boolean($("camGammaEnable")?.checked),
+    Saturation: Number($("camSaturation")?.value || 128),
+    SaturationEnable: Boolean($("camSaturationEnable")?.checked),
+    TriggerModeString: "Off",
+  };
+}
+
+function fillCameraForm(params = {}) {
+  const setVal = (id, value) => {
+    const el = $(id);
+    if (!el || value == null) return;
+    if (el.type === "checkbox") el.checked = Boolean(value);
+    else el.value = value;
+  };
+  setVal("camExposure", params.ExposureTime);
+  setVal("camGainAuto", params.GainAuto);
+  setVal("camFrameRate", params.FrameRate);
+  setVal("camFrameRateEnable", params.FrameRateEnable);
+  setVal("camGamma", params.Gamma);
+  setVal("camGammaEnable", params.GammaEnable);
+  setVal("camSaturation", params.Saturation);
+  setVal("camSaturationEnable", params.SaturationEnable);
+  syncCameraControlOutputs();
+}
+
+async function refreshCameraConfig() {
+  try {
+    const res = await fetch("/api/camera/config", { cache: "no-store" });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.output || data.message || `HTTP ${res.status}`);
+    fillCameraForm(data.params || {});
+    setText("cameraConfigPath", data.path || "-");
+    setText("cameraRunState", data.camera_running ? "运行中" : "未运行");
+    if (data.note) setText("cameraConfigNote", data.note);
+    const presetBox = $("cameraPresetActions");
+    if (presetBox && data.presets) {
+      const keys = Object.keys(data.presets);
+      if (keys.length) {
+        presetBox.innerHTML = keys.map((key) => {
+          const label = data.presets[key]?.label || key;
+          return `<button type="button" class="primary" data-camera-preset="${escapeHtml(key)}">${escapeHtml(label)}</button>`;
+        }).join("");
+        presetBox.querySelectorAll("[data-camera-preset]").forEach((btn) => {
+          btn.addEventListener("click", () => applyCameraPreset(btn.dataset.cameraPreset));
+        });
+      }
+    }
+  } catch (err) {
+    toast(`相机参数读取失败: ${err.message}`);
+  }
+}
+
+async function applyCameraConfig(restart = true) {
+  const params = readCameraFormParams();
+  toast(restart ? "写入配置并重启相机…" : "仅保存配置…");
+  try {
+    const res = await fetch("/api/camera/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ params, restart }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.output || data.message || `HTTP ${res.status}`);
+    fillCameraForm(data.params || params);
+    setText("cameraRunState", restart ? "重启中/运行中" : ($("cameraRunState")?.textContent || "-"));
+    toast(data.output || (restart ? "已应用并重启" : "已保存"));
+    if (data.output) $("logBox").textContent = data.output;
+    await refreshStatus();
+    await refreshCameraConfig();
+    if (restart) {
+      setTimeout(() => {
+        ensureCameraStream();
+        toast("请查看预览是否曝光正常");
+      }, 1500);
+    }
+  } catch (err) {
+    toast(`应用失败: ${err.message}`);
+  }
+}
+
+async function applyCameraPreset(presetId) {
+  if (!presetId) return;
+  toast(`应用预设 ${presetId}…`);
+  try {
+    const res = await fetch("/api/camera/preset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ preset: presetId, restart: true }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.output || data.message || `HTTP ${res.status}`);
+    fillCameraForm(data.params || {});
+    toast(data.output || `已应用 ${data.preset_label || presetId}`);
+    if (data.output) $("logBox").textContent = data.output;
+    await refreshStatus();
+    await refreshCameraConfig();
+    setTimeout(() => ensureCameraStream(), 1500);
+  } catch (err) {
+    toast(`预设失败: ${err.message}`);
+  }
 }
 
 function formatTime(ts) {
@@ -473,20 +597,39 @@ function ensureCameraStream() {
   cameraWs.onclose = () => {
     cameraWs = null;
     setText("cameraMeta", "视频已断开");
+    setText("cameraDebugMeta", "视频已断开");
   };
   cameraWs.onerror = () => toast("视频连接失败");
   cameraWs.onmessage = (event) => {
-    const msg = JSON.parse(event.data);
-    if (msg.type === "image") {
+    let msg;
+    try {
+      msg = JSON.parse(event.data);
+    } catch (err) {
+      return;
+    }
+    // Bridge may send base64 under "data" (current) or legacy "jpeg_b64".
+    const b64 = msg.jpeg_b64 || msg.data || msg.jpeg || "";
+    if (msg.type === "image" && b64) {
+      const src = b64.startsWith("data:") ? b64 : `data:image/jpeg;base64,${b64}`;
       const img = $("cameraImage");
-      img.src = `data:image/jpeg;base64,${msg.data}`;
-      img.style.display = "block";
-      $("cameraEmpty").style.display = "none";
-      setText("cameraMeta", `${msg.topic} · ${msg.width}x${msg.height}`);
-    } else if (msg.type === "rates") {
-      updateRates(msg.rates || {});
+      if (img) {
+        img.src = src;
+        img.style.display = "block";
+      }
+      if ($("cameraEmpty")) $("cameraEmpty").style.display = "none";
+      setText("cameraMeta", `${msg.topic || "image"} · ${msg.width || "?"}x${msg.height || "?"}`);
+      const dbg = $("cameraDebugImage");
+      if (dbg) {
+        dbg.src = src;
+        dbg.style.display = "block";
+      }
+      if ($("cameraDebugEmpty")) $("cameraDebugEmpty").style.display = "none";
+      setText("cameraDebugMeta", `${msg.topic || "image"} · ${msg.width || "?"}x${msg.height || "?"}`);
+    } else if ((msg.type === "rate" || msg.type === "rates") && msg.rates) {
+      updateRates(msg.rates);
     } else if (msg.type === "status") {
-      setText("cameraMeta", msg.message);
+      setText("cameraMeta", msg.message || "视频状态更新");
+      setText("cameraDebugMeta", msg.message || "视频状态更新");
     }
   };
 }
@@ -1208,6 +1351,19 @@ function bindUi() {
   $("toggleFullscreen").addEventListener("click", toggleFullscreen);
   $("gsListDatasets")?.addEventListener("click", listGsDatasets);
   $("gsSyncLatest")?.addEventListener("click", syncLatestGsDataset);
+  $("refreshCameraConfig")?.addEventListener("click", () => refreshCameraConfig());
+  $("applyCameraConfig")?.addEventListener("click", () => applyCameraConfig(true));
+  $("saveCameraConfigOnly")?.addEventListener("click", () => applyCameraConfig(false));
+  $("cameraPreviewConnect")?.addEventListener("click", () => {
+    ensureCameraStream();
+    toast("已连接相机预览");
+  });
+  ["camExposure", "camFrameRate", "camGamma", "camSaturation"].forEach((id) => {
+    $(id)?.addEventListener("input", syncCameraControlOutputs);
+  });
+  document.querySelectorAll("[data-camera-preset]").forEach((btn) => {
+    btn.addEventListener("click", () => applyCameraPreset(btn.dataset.cameraPreset));
+  });
   window.addEventListener("resize", resizeThree);
   document.addEventListener("fullscreenchange", updateFullscreenButton);
   document.addEventListener("webkitfullscreenchange", updateFullscreenButton);

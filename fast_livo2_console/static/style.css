@@ -469,6 +469,105 @@ main {
   text-align: center;
 }
 
+.camera-debug-frame {
+  position: relative;
+  min-height: 220px;
+  background: #111820;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+
+.camera-debug-frame img {
+  display: none;
+  width: 100%;
+  height: auto;
+  max-height: 360px;
+  object-fit: contain;
+  background: #0b1016;
+}
+
+#cameraDebugEmpty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  text-align: center;
+  color: #9aa8b5;
+  font-weight: 650;
+}
+
+.camera-controls {
+  display: grid;
+  gap: 14px;
+}
+
+.camera-control {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafb;
+}
+
+.camera-control-title {
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.camera-control select {
+  min-height: 48px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 12px;
+  font-size: 16px;
+  font-weight: 650;
+  background: #fff;
+}
+
+.camera-control.check-control {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 12px;
+}
+
+.camera-control.check-control input[type="checkbox"] {
+  width: 24px;
+  height: 24px;
+}
+
+.camera-control.range-control {
+  grid-template-columns: 1fr auto;
+  align-items: center;
+}
+
+.camera-control.range-control .camera-control-title {
+  grid-column: 1 / -1;
+}
+
+.camera-control.range-control input[type="range"] {
+  width: 100%;
+  min-height: 36px;
+}
+
+.camera-control.range-control output {
+  min-width: 64px;
+  text-align: right;
+  font-weight: 800;
+  color: var(--accent-strong);
+}
+
+.data-hint {
+  margin: 12px 0 0;
+  color: #5b6b78;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
 .three-wrap {
   position: relative;
   min-height: 300px;

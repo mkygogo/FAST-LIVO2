@@ -204,16 +204,94 @@
     </section>
 
     <section id="camera" class="page">
+      <div class="grid two">
+        <section class="panel">
+          <h2>相机控制</h2>
+          <div class="kv">
+            <span>驱动状态</span><strong id="cameraRunState">-</strong>
+            <span>当前状态</span><strong id="cameraState">等待硬件</strong>
+            <span>图像 topic</span><strong>/left_camera/image · /hikrobot_camera/rgb</strong>
+            <span>配置文件</span><strong id="cameraConfigPath">-</strong>
+          </div>
+          <div class="actions">
+            <button class="primary" data-action="/api/camera/start">启动相机</button>
+            <button class="danger" data-action="/api/camera/stop">停止相机</button>
+            <button type="button" id="cameraPreviewConnect">预览画面</button>
+            <button type="button" id="refreshCameraConfig">刷新参数</button>
+          </div>
+          <p class="data-hint" id="cameraConfigNote">曝光等参数在驱动启动时写入相机；点「应用并重启」后生效。</p>
+        </section>
+        <section class="panel">
+          <h2>实时预览</h2>
+          <div class="camera-debug-frame">
+            <img id="cameraDebugImage" alt="相机调试预览">
+            <div id="cameraDebugEmpty">点击「预览画面」或启动相机后显示</div>
+          </div>
+          <div class="kv below">
+            <span>预览</span><strong id="cameraDebugMeta">未连接</strong>
+          </div>
+        </section>
+      </div>
+
       <section class="panel">
-        <h2>Hikrobot 相机调试</h2>
-        <div class="kv">
-          <span>图像 topic</span><strong>/left_camera/image 或 /rgb_img</strong>
-          <span>当前状态</span><strong id="cameraState">等待硬件</strong>
+        <h2>场景预设</h2>
+        <div class="actions" id="cameraPresetActions">
+          <button type="button" class="primary" data-camera-preset="indoor">室内</button>
+          <button type="button" class="primary" data-camera-preset="outdoor">室外</button>
+          <button type="button" class="primary" data-camera-preset="outdoor_bright">强光</button>
         </div>
-        <div class="actions">
-          <button class="primary" data-action="/api/camera/start">启动相机</button>
-          <button class="danger" data-action="/api/camera/stop">停止相机</button>
+        <p class="data-hint">室外发白优先用「室外 / 强光」降低 ExposureTime；仍过曝可再手动下调曝光。</p>
+      </section>
+
+      <section class="panel">
+        <h2>手动参数</h2>
+        <div class="camera-controls">
+          <label class="range-control camera-control">
+            <span class="camera-control-title">曝光 ExposureTime (µs)</span>
+            <input id="camExposure" type="range" min="100" max="50000" step="100" value="12000">
+            <output id="camExposureValue">12000</output>
+          </label>
+          <label class="camera-control">
+            <span class="camera-control-title">增益 GainAuto</span>
+            <select id="camGainAuto">
+              <option value="0">0 · Off 固定</option>
+              <option value="1">1 · Once 一次</option>
+              <option value="2" selected>2 · Continuous 连续</option>
+            </select>
+          </label>
+          <label class="range-control camera-control">
+            <span class="camera-control-title">帧率 FrameRate</span>
+            <input id="camFrameRate" type="range" min="1" max="30" step="1" value="10">
+            <output id="camFrameRateValue">10</output>
+          </label>
+          <label class="camera-control check-control">
+            <input id="camFrameRateEnable" type="checkbox" checked>
+            <span>启用帧率限制 FrameRateEnable</span>
+          </label>
+          <label class="range-control camera-control">
+            <span class="camera-control-title">伽马 Gamma</span>
+            <input id="camGamma" type="range" min="0.1" max="2.5" step="0.05" value="0.7">
+            <output id="camGammaValue">0.70</output>
+          </label>
+          <label class="camera-control check-control">
+            <input id="camGammaEnable" type="checkbox" checked>
+            <span>启用伽马 GammaEnable</span>
+          </label>
+          <label class="range-control camera-control">
+            <span class="camera-control-title">饱和度 Saturation</span>
+            <input id="camSaturation" type="range" min="0" max="255" step="1" value="128">
+            <output id="camSaturationValue">128</output>
+          </label>
+          <label class="camera-control check-control">
+            <input id="camSaturationEnable" type="checkbox">
+            <span>启用饱和度 SaturationEnable</span>
+          </label>
         </div>
+        <div class="actions" style="margin-top:14px">
+          <button type="button" class="primary" id="applyCameraConfig">应用并重启相机</button>
+          <button type="button" id="saveCameraConfigOnly">仅保存不重启</button>
+        </div>
+        <p class="data-hint" id="cameraApplyHint">应用时会停止并重新启动 hikrobot_camera，预览会短暂中断。</p>
       </section>
     </section>
 

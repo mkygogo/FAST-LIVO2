@@ -706,6 +706,285 @@ def action_lidar_check():
     return res
 
 
+CAMERA_CONFIG_PATH = (
+    HOME
+    / "fast_livo2_ws"
+    / "src"
+    / "jr_fastlivo_validation"
+    / "config"
+    / "hikrobot_camera_continuous_calib.yaml"
+)
+
+# Fields the touch UI may edit. Driver applies these only at process start.
+CAMERA_CONFIG_DEFAULTS = {
+    "width": 1280,
+    "height": 1024,
+    "Offset_x": 0,
+    "Offset_y": 0,
+    "FrameRateEnable": True,
+    "FrameRate": 10,
+    "ExposureTime": 12000,
+    "GammaEnable": True,
+    "Gamma": 0.7,
+    "GainAuto": 2,
+    "SaturationEnable": False,
+    "Saturation": 128,
+    "TriggerModeString": "Off",
+}
+
+CAMERA_PRESETS = {
+    "indoor": {
+        "label": "室内",
+        "ExposureTime": 20000,
+        "GainAuto": 2,
+        "GammaEnable": True,
+        "Gamma": 0.7,
+        "FrameRate": 10,
+        "FrameRateEnable": True,
+    },
+    "outdoor": {
+        "label": "室外",
+        "ExposureTime": 2000,
+        "GainAuto": 2,
+        "GammaEnable": True,
+        "Gamma": 0.7,
+        "FrameRate": 10,
+        "FrameRateEnable": True,
+    },
+    "outdoor_bright": {
+        "label": "强光",
+        "ExposureTime": 800,
+        "GainAuto": 0,
+        "GammaEnable": True,
+        "Gamma": 0.7,
+        "FrameRate": 10,
+        "FrameRateEnable": True,
+    },
+}
+
+
+def _yaml_scalar(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float):
+        text = f"{value:.6f}".rstrip("0").rstrip(".")
+        return text if text else "0"
+    if isinstance(value, int):
+        return str(value)
+    if value is None:
+        return "null"
+    text = str(value)
+    if re.search(r'[:#\[\]{},&*!|>\'"%@`]', text) or text.strip() != text:
+        return json.dumps(text, ensure_ascii=False)
+    return text
+
+
+def parse_simple_yaml(path):
+    """Minimal YAML subset used by hikrobot camera config files."""
+    data = {}
+    try:
+        text = pathlib.Path(path).read_text(encoding="utf-8")
+    except Exception as exc:
+        return {}, str(exc)
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        low = value.lower()
+        if low in ("true", "yes", "on"):
+            data[key] = True
+        elif low in ("false", "no", "off"):
+            data[key] = False
+        elif re.fullmatch(r"-?\d+", value):
+            data[key] = int(value)
+        elif re.fullmatch(r"-?\d+\.\d+", value):
+            data[key] = float(value)
+        elif (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            data[key] = value[1:-1]
+        else:
+            data[key] = value
+    return data, None
+
+
+def write_camera_config_yaml(path, params):
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# Hikrobot continuous camera config (managed by JR console camera page).",
+        "# Applied only when hikrobot_camera process starts — restart camera after changes.",
+        f"# updated: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+    ]
+    order = [
+        "width",
+        "height",
+        "Offset_x",
+        "Offset_y",
+        "FrameRateEnable",
+        "FrameRate",
+        "ExposureTime",
+        "GammaEnable",
+        "Gamma",
+        "GainAuto",
+        "SaturationEnable",
+        "Saturation",
+        "TriggerModeString",
+    ]
+    for key in order:
+        if key in params:
+            lines.append(f"{key}: {_yaml_scalar(params[key])}")
+    for key, value in params.items():
+        if key not in order:
+            lines.append(f"{key}: {_yaml_scalar(value)}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def normalize_camera_params(raw):
+    """Whitelist and clamp camera parameters from UI."""
+    base = dict(CAMERA_CONFIG_DEFAULTS)
+    if not isinstance(raw, dict):
+        return base, ["payload must be object"]
+    errors = []
+
+    def as_bool(key, default):
+        if key not in raw:
+            return default
+        val = raw[key]
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, (int, float)):
+            return bool(val)
+        if isinstance(val, str):
+            low = val.strip().lower()
+            if low in ("true", "1", "yes", "on"):
+                return True
+            if low in ("false", "0", "no", "off"):
+                return False
+        errors.append(f"{key}: invalid bool")
+        return default
+
+    def as_int(key, default, lo, hi):
+        if key not in raw:
+            return default
+        try:
+            val = int(float(raw[key]))
+        except Exception:
+            errors.append(f"{key}: invalid int")
+            return default
+        return max(lo, min(hi, val))
+
+    def as_float(key, default, lo, hi):
+        if key not in raw:
+            return default
+        try:
+            val = float(raw[key])
+        except Exception:
+            errors.append(f"{key}: invalid float")
+            return default
+        return max(lo, min(hi, val))
+
+    out = {
+        "width": as_int("width", base["width"], 320, 4096),
+        "height": as_int("height", base["height"], 240, 4096),
+        "Offset_x": as_int("Offset_x", base["Offset_x"], 0, 4096),
+        "Offset_y": as_int("Offset_y", base["Offset_y"], 0, 4096),
+        "FrameRateEnable": as_bool("FrameRateEnable", base["FrameRateEnable"]),
+        "FrameRate": as_int("FrameRate", base["FrameRate"], 1, 60),
+        "ExposureTime": as_int("ExposureTime", base["ExposureTime"], 50, 100000),
+        "GammaEnable": as_bool("GammaEnable", base["GammaEnable"]),
+        "Gamma": as_float("Gamma", base["Gamma"], 0.1, 4.0),
+        "GainAuto": as_int("GainAuto", base["GainAuto"], 0, 2),
+        "SaturationEnable": as_bool("SaturationEnable", base["SaturationEnable"]),
+        "Saturation": as_int("Saturation", base["Saturation"], 0, 255),
+        "TriggerModeString": "Off",
+    }
+    return out, errors
+
+
+def camera_config_status():
+    path = CAMERA_CONFIG_PATH
+    parsed, err = parse_simple_yaml(path) if path.exists() else ({}, "config missing")
+    params = dict(CAMERA_CONFIG_DEFAULTS)
+    params.update({k: parsed[k] for k in CAMERA_CONFIG_DEFAULTS if k in parsed})
+    # keep unknown keys from file for completeness
+    for k, v in parsed.items():
+        if k not in params:
+            params[k] = v
+    running = container_running(CONTAINERS["camera"])
+    return {
+        "ok": True,
+        "path": str(path),
+        "exists": path.exists(),
+        "read_error": err,
+        "params": params,
+        "running": running,
+        "camera_running": bool(running),
+        "presets": {
+            key: {"label": val["label"], "params": {k: v for k, v in val.items() if k != "label"}}
+            for key, val in CAMERA_PRESETS.items()
+        },
+        "note": "参数在相机驱动启动时写入设备；应用后会重启 hikrobot_camera。",
+        "limits": {
+            "ExposureTime": {"min": 50, "max": 100000, "unit": "us"},
+            "FrameRate": {"min": 1, "max": 60},
+            "Gamma": {"min": 0.1, "max": 4.0},
+            "GainAuto": {"values": {"0": "Off", "1": "Once", "2": "Continuous"}},
+            "Saturation": {"min": 0, "max": 255},
+        },
+    }
+
+
+def action_camera_config_apply(body, restart=True):
+    params, errors = normalize_camera_params(body if isinstance(body, dict) else {})
+    if errors and body is not None:
+        # still apply clamped values; surface parse issues
+        pass
+    write_camera_config_yaml(CAMERA_CONFIG_PATH, params)
+    result = {
+        "ok": True,
+        "path": str(CAMERA_CONFIG_PATH),
+        "params": params,
+        "errors": errors,
+        "restarted": False,
+        "output": f"已写入 {CAMERA_CONFIG_PATH}",
+    }
+    if restart:
+        stop_res = action_camera_stop()
+        start_res = action_camera_start()
+        result["restarted"] = True
+        result["stop"] = stop_res
+        result["start"] = start_res
+        result["ok"] = bool(start_res.get("ok"))
+        result["output"] = (
+            f"已写入配置并重启相机。"
+            f" stop={stop_res.get('ok')} start={start_res.get('ok')}"
+        )
+        if start_res.get("output"):
+            result["output"] += "\n" + str(start_res.get("output"))[-800:]
+    return result
+
+
+def action_camera_preset(preset_id, restart=True):
+    preset = CAMERA_PRESETS.get(preset_id)
+    if not preset:
+        return {"ok": False, "output": f"unknown preset: {preset_id}", "presets": list(CAMERA_PRESETS)}
+    current = camera_config_status()["params"]
+    merged = dict(current)
+    for key, value in preset.items():
+        if key == "label":
+            continue
+        merged[key] = value
+    res = action_camera_config_apply(merged, restart=restart)
+    res["preset"] = preset_id
+    res["preset_label"] = preset["label"]
+    return res
+
+
 def action_camera_start():
     running = container_running(CONTAINERS["camera"])
     if running:
@@ -1159,6 +1438,17 @@ async def handle_websocket(reader, writer, path, headers, kind):
         await stream_points(writer, mode, quality)
 
 
+async def read_request_body(reader, headers):
+    try:
+        length = int(headers.get("content-length", "0") or "0")
+    except Exception:
+        length = 0
+    if length <= 0:
+        return b""
+    length = min(length, 256 * 1024)
+    return await reader.readexactly(length)
+
+
 async def handle_http(reader, writer):
     try:
         data = await reader.readuntil(b"\r\n\r\n")
@@ -1188,6 +1478,21 @@ async def handle_http(reader, writer):
             pass
         return
 
+    body = b""
+    if method in ("POST", "PUT", "PATCH"):
+        try:
+            body = await read_request_body(reader, headers)
+        except Exception:
+            body = b""
+
+    def parse_json_body():
+        if not body:
+            return {}
+        try:
+            return json.loads(body.decode("utf-8"))
+        except Exception:
+            return None
+
     try:
         if clean_path == "/api/status" and method == "GET":
             json_response(writer, api_status())
@@ -1209,6 +1514,21 @@ async def handle_http(reader, writer):
             json_response(writer, action_lidar_stop())
         elif method == "POST" and clean_path == "/api/lidar/check":
             json_response(writer, action_lidar_check())
+        elif method == "GET" and clean_path == "/api/camera/config":
+            json_response(writer, camera_config_status())
+        elif method == "POST" and clean_path == "/api/camera/config":
+            payload = parse_json_body()
+            if payload is None:
+                json_response(writer, {"ok": False, "output": "invalid JSON body"})
+            else:
+                restart = bool(payload.get("restart", True))
+                params = payload.get("params") if isinstance(payload.get("params"), dict) else payload
+                json_response(writer, action_camera_config_apply(params, restart=restart))
+        elif method == "POST" and clean_path == "/api/camera/preset":
+            payload = parse_json_body() or {}
+            preset_id = str(payload.get("preset") or payload.get("id") or "").strip()
+            restart = bool(payload.get("restart", True))
+            json_response(writer, action_camera_preset(preset_id, restart=restart))
         elif method == "POST" and clean_path == "/api/camera/start":
             json_response(writer, action_camera_start())
         elif method == "POST" and clean_path == "/api/camera/stop":
