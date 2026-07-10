@@ -3,34 +3,136 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>JR扫描仪控制台</title>
+  <title>JR 扫描仪控制台</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <header class="topbar">
     <div>
-      <h1>JR扫描仪控制台</h1>
-      <p id="subtitle">本机控制 · Mid360 · 点云预览</p>
+      <h1>JR 扫描仪</h1>
+      <p id="subtitle">扫描建图 · 视频预览 · 三维检查</p>
     </div>
     <div class="status-pill" id="serviceState">连接中</div>
   </header>
 
   <nav class="tabs" aria-label="页面">
-    <button class="tab active" data-tab="home">首页</button>
-    <button class="tab" data-tab="lidar">雷达</button>
-    <button class="tab" data-tab="camera">相机</button>
-    <button class="tab" data-tab="fastlivo">建图</button>
-    <button class="tab" data-tab="preview">预览</button>
+    <button class="tab active" data-tab="fastlivo">建图</button>
+    <button class="tab" data-tab="data">数据管理</button>
+    <button class="tab" data-tab="overview">设备概览</button>
+    <button class="tab" data-tab="lidar">雷达调试</button>
+    <button class="tab" data-tab="camera">相机调试</button>
     <button class="tab" data-tab="bag">录包</button>
     <button class="tab" data-tab="logs">日志</button>
     <button class="tab" data-tab="settings">设置</button>
   </nav>
 
   <main>
-    <section id="home" class="page active">
+    <section id="fastlivo" class="page active">
+      <section class="scan-shell">
+        <div class="scan-bar">
+          <div>
+            <h2>扫描建图</h2>
+            <p id="scanStateText">未开始</p>
+          </div>
+          <div class="scan-actions">
+            <button id="startScan" class="primary">开始建图</button>
+            <button id="finishScan" class="danger">完成建图</button>
+          </div>
+        </div>
+
+        <div class="scan-preview">
+          <section class="video-panel">
+            <div class="panel-title">
+              <strong>实时视频</strong>
+              <span id="cameraMeta">未连接</span>
+            </div>
+            <div class="camera-frame">
+              <img id="cameraImage" alt="实时相机画面">
+              <div id="cameraEmpty">等待 /rgb_img 或 /left_camera/image</div>
+            </div>
+          </section>
+
+          <section class="map-panel" id="mapPanel">
+            <div class="panel-title">
+              <strong id="mapTitle">三维场景</strong>
+              <span id="mapMeta">0 点</span>
+            </div>
+            <div class="three-wrap" id="threeWrap">
+              <div id="threeViewport"></div>
+              <button id="toggleFullscreen" class="fullscreen-btn" aria-label="三维全屏">
+                <svg class="icon-enter" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"></path>
+                  <path d="M3 3l7 7M21 3l-7 7M3 21l7-7M21 21l-7-7"></path>
+                </svg>
+                <svg class="icon-exit" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M10 3v7H3M14 3v7h7M10 21v-7H3M14 21v-7h7"></path>
+                </svg>
+              </button>
+              <div class="map-hud" id="mapHud">未连接</div>
+              <div class="joystick joystick-left" id="moveStick" aria-label="移动摇杆">
+                <span></span>
+              </div>
+              <div class="joystick joystick-right" id="lookStick" aria-label="视角摇杆">
+                <span></span>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div class="viewer-tools">
+          <div class="tool-row view-row">
+            <button id="viewFps" class="active">FPS跟随</button>
+            <button id="viewTop">俯视检查</button>
+            <button id="viewFree">自由查看</button>
+            <button id="toggleQuality">小主机模式</button>
+            <button id="toggleColorBoost" class="active">RGB增强</button>
+            <button id="toggleTiltCorrection" class="active">Z-30校正</button>
+          </div>
+          <div class="tool-row">
+            <button id="resetView">重置视角</button>
+            <button id="clearPoints">清空实时缓存</button>
+            <button id="loadLatestMap">打开最新模型</button>
+            <button id="connectStreams">重连预览</button>
+          </div>
+          <div class="tool-row slider-row">
+            <label class="range-control">点大小
+              <input id="pointSizeScale" type="range" min="0.5" max="4" step="0.25" value="1">
+              <output id="pointSizeValue">1.0x</output>
+            </label>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <section id="data" class="page">
+      <section class="panel data-shell">
+        <div class="data-list-col">
+          <div class="data-list-head">
+            <h2>已保存建图</h2>
+            <button id="refreshDataMaps" type="button">刷新</button>
+          </div>
+          <div id="dataMapList" class="data-list" aria-label="建图列表">
+            <div class="data-list-empty">加载中…</div>
+          </div>
+        </div>
+        <div class="data-detail-col">
+          <div id="dataMapDetail" class="data-detail">
+            <div class="empty">
+              <strong>选择左侧扫描记录</strong>
+              <span>完成建图后，结果会出现在此列表</span>
+            </div>
+          </div>
+          <div class="data-detail-actions">
+            <button id="openDataPreview" class="primary" type="button" disabled>打开预览</button>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <section id="overview" class="page">
       <div class="grid two">
         <section class="panel">
-          <h2>运行状态</h2>
+          <h2>设备状态</h2>
           <div class="metrics">
             <div><span>主机</span><strong id="hostName">-</strong></div>
             <div><span>内存</span><strong id="memState">-</strong></div>
@@ -39,15 +141,31 @@
           </div>
         </section>
         <section class="panel">
-          <h2>一键操作</h2>
-          <div class="actions">
-            <button class="primary" data-action="/api/lidar/start">启动雷达</button>
-            <button class="primary" data-action="/api/lio/start_all">启动雷达建图</button>
-            <button class="danger" data-action="/api/stop_all">停止全部</button>
-            <button data-action="/api/perf/snapshot">性能快照</button>
+          <h2>输出频率</h2>
+          <div class="metrics">
+            <div><span>/livox/lidar</span><strong id="hzLidar">-</strong></div>
+            <div><span>/livox/imu</span><strong id="hzImu">-</strong></div>
+            <div><span>/cloud_registered</span><strong id="hzCloud">-</strong></div>
+            <div><span>/path</span><strong id="hzPath">-</strong></div>
+            <div><span>/aft_mapped_to_init</span><strong id="hzOdom">-</strong></div>
           </div>
         </section>
       </div>
+      <section class="panel">
+        <h2>磁盘与数据</h2>
+        <div class="metrics">
+          <div><span>磁盘总量</span><strong id="diskTotal">-</strong></div>
+          <div><span>已用 / 可用</span><strong id="diskUsedFree">-</strong></div>
+          <div><span>使用率</span><strong id="diskUsedPct">-</strong></div>
+          <div><span>建图目录</span><strong id="mapsDirSize">-</strong></div>
+          <div><span>Rosbag 目录</span><strong id="bagsDirSize">-</strong></div>
+          <div><span>建图数 / Bag 数</span><strong id="storageCounts">-</strong></div>
+        </div>
+        <div class="kv" style="margin-top:12px">
+          <span>建图路径</span><strong id="mapsDirPath">-</strong>
+          <span>Bag 路径</span><strong id="bagsDirPath">-</strong>
+        </div>
+      </section>
       <section class="panel">
         <h2>ROS Topic</h2>
         <div id="topicList" class="chips"></div>
@@ -57,7 +175,7 @@
     <section id="lidar" class="page">
       <div class="grid two">
         <section class="panel">
-          <h2>Mid360</h2>
+          <h2>Mid360 调试</h2>
           <div class="kv">
             <span>雷达网口</span><strong>enp1s0</strong>
             <span>主机 IP</span><strong>192.168.1.5/24</strong>
@@ -71,10 +189,15 @@
           </div>
         </section>
         <section class="panel">
-          <h2>实时频率</h2>
-          <div class="metrics">
-            <div><span>/livox/lidar</span><strong id="hzLidar">-</strong></div>
-            <div><span>/livox/imu</span><strong id="hzImu">-</strong></div>
+          <h2>单独雷达建图</h2>
+          <div class="empty">
+            <strong>只用于异常排查</strong>
+            <span>这里启动 FAST_LIO，不启动相机，也不走 FAST-LIVO2 官方 PCD 保存流程。</span>
+          </div>
+          <div class="actions">
+            <button class="primary" data-action="/api/lio/start_all">启动雷达建图</button>
+            <button class="primary" data-action="/api/lio/start">仅启动算法</button>
+            <button class="danger" data-action="/api/lio/stop">停止雷达建图</button>
           </div>
         </section>
       </div>
@@ -82,115 +205,15 @@
 
     <section id="camera" class="page">
       <section class="panel">
-        <h2>相机</h2>
-        <div class="empty">
-          <strong>未配置相机驱动</strong>
-          <span>当前先保留检测和控制框架。接入相机后，把启动脚本、图像 topic 和标定文件挂到这里即可。</span>
-        </div>
+        <h2>Hikrobot 相机调试</h2>
         <div class="kv">
-          <span>期望 topic</span><strong>/left_camera/image 或 /rgb_img</strong>
+          <span>图像 topic</span><strong>/left_camera/image 或 /rgb_img</strong>
           <span>当前状态</span><strong id="cameraState">等待硬件</strong>
         </div>
-      </section>
-    </section>
-
-    <section id="fastlivo" class="page">
-      <div class="grid two">
-        <section class="panel">
-          <h2>雷达建图</h2>
-          <div class="actions">
-            <button class="primary" data-action="/api/lio/start_all">启动雷达+建图</button>
-            <button class="primary" data-action="/api/lio/start">仅启动建图</button>
-            <button class="danger" data-action="/api/lio/stop">停止建图</button>
-          </div>
-        </section>
-        <section class="panel">
-          <h2>输出状态</h2>
-          <div class="metrics">
-            <div><span>/cloud_registered</span><strong id="hzCloud">-</strong></div>
-            <div><span>/path</span><strong id="hzPath">-</strong></div>
-            <div><span>/aft_mapped_to_init</span><strong id="hzOdom">-</strong></div>
-          </div>
-        </section>
-      </div>
-      <section class="panel">
-        <h2>视觉融合</h2>
-        <div class="empty">
-          <strong>等待相机和同步板</strong>
-          <span>当前阶段先使用雷达+IMU建图。相机到位后再启用视觉融合算法。</span>
-        </div>
         <div class="actions">
-          <button data-action="/api/fastlivo/start_all">启动融合算法</button>
-          <button class="danger" data-action="/api/fastlivo/stop">停止融合算法</button>
+          <button class="primary" data-action="/api/camera/start">启动相机</button>
+          <button class="danger" data-action="/api/camera/stop">停止相机</button>
         </div>
-      </section>
-    </section>
-
-    <section id="preview" class="page">
-      <section class="viewer">
-        <div class="viewer-head">
-          <div>
-            <h2>点云预览</h2>
-            <p id="viewerMeta">未连接</p>
-          </div>
-          <div class="segmented">
-            <button id="modeLidar" class="active">雷达</button>
-            <button id="modeMapping">雷达建图</button>
-          </div>
-        </div>
-        <div class="canvas-wrap">
-          <canvas id="cloudCanvas"></canvas>
-          <button id="toggleFullscreen" class="fullscreen-btn" aria-label="进入全屏">
-            <svg class="icon-enter" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"></path>
-              <path d="M3 3l7 7M21 3l-7 7M3 21l7-7M21 21l-7-7"></path>
-            </svg>
-            <svg class="icon-exit" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M10 3v7H3M14 3v7h7M10 21v-7H3M14 21v-7h7"></path>
-            </svg>
-          </button>
-          <div class="zoom-rail" aria-label="缩放控制">
-            <button id="zoomIn" aria-label="放大">+</button>
-            <button id="zoomOut" aria-label="缩小">-</button>
-          </div>
-        </div>
-        <div class="viewer-tools">
-          <div class="tool-row view-row">
-            <button class="active" data-view="top">俯视</button>
-            <button data-view="front">前视</button>
-            <button data-view="side">侧视</button>
-            <button data-view="free">自由3D</button>
-          </div>
-          <div class="tool-row">
-            <button id="rotateLeft">左转</button>
-            <button id="rotateRight">右转</button>
-            <button id="centerView">居中</button>
-            <button id="toggleFollow" class="active">跟随开</button>
-          </div>
-          <div class="tool-row">
-            <button id="resetView">重置</button>
-            <button id="clearPoints">清空</button>
-            <span></span>
-            <span></span>
-          </div>
-          <div class="viewer-controls">
-            <button id="connectPreview" class="primary">连接预览</button>
-          </div>
-        </div>
-      </section>
-    </section>
-
-    <section id="logs" class="page">
-      <section class="panel">
-        <h2>日志</h2>
-        <div class="actions compact">
-          <button data-log="lidar">雷达</button>
-          <button data-log="lio">建图</button>
-          <button data-log="fastlivo">融合</button>
-          <button data-log="bag">录包</button>
-          <button data-log="check">检查</button>
-        </div>
-        <pre id="logBox">选择日志类型</pre>
       </section>
     </section>
 
@@ -208,6 +231,20 @@
       </section>
     </section>
 
+    <section id="logs" class="page">
+      <section class="panel">
+        <h2>日志</h2>
+        <div class="actions compact">
+          <button data-log="lidar">雷达</button>
+          <button data-log="lio">雷达建图</button>
+          <button data-log="fastlivo">FAST-LIVO2</button>
+          <button data-log="bag">录包</button>
+          <button data-log="check">检查</button>
+        </div>
+        <pre id="logBox">选择日志类型</pre>
+      </section>
+    </section>
+
     <section id="settings" class="page">
       <section class="panel">
         <h2>设置</h2>
@@ -215,17 +252,21 @@
           <span>访问地址</span><strong>http://localhost:8090</strong>
           <span>监听范围</span><strong>127.0.0.1 本机</strong>
           <span>工作区</span><strong>/home/jr/fast_livo2_ws</strong>
-          <span>部署目录</span><strong>/home/jr/fast_livo2_deploy</strong>
+          <span>地图输出</span><strong>/home/jr/fast_livo2_data/output/fast_livo2_maps</strong>
+          <span>GS-LIVO 数据包</span><strong>/home/jr/fast_livo2_data/output/gs_livo_datasets</strong>
         </div>
         <div class="actions">
-          <button onclick="toast('Foxglove Bridge 尚未启用，后续可作为高级可视化模式接入')">打开 Foxglove</button>
           <button data-action="/api/perf/snapshot">性能快照</button>
+          <button id="gsListDatasets">查看GS数据包</button>
+          <button id="gsSyncLatest">同步最新GS数据包</button>
+          <button class="danger" data-action="/api/stop_all">停止全部</button>
         </div>
       </section>
     </section>
   </main>
 
   <footer id="toast"></footer>
+  <script src="/vendor/three.min.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

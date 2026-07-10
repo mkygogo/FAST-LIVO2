@@ -1,8 +1,10 @@
 [Desktop Entry]
 Type=Application
 Name=JR扫描仪控制台
-Comment=Open the local JR scanner touch console
-Exec=firefox http://localhost:8090
+Comment=本地触控扫描控制台（Chromium 应用模式）
+Exec=/home/jr/fast_livo2_deploy/console/scripts/start_console_app.sh
 Icon=applications-engineering
 Terminal=false
-Categories=Development;Science;
+Categories=Utility;Science;
+StartupNotify=true
+StartupWMClass=jr-scanner-console
