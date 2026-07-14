@@ -1,0 +1,64 @@
+<launch>
+  <arg name="rviz" default="false" />
+  <arg name="lidar_topic" default="/livox/lidar_legacy" />
+  <arg name="driver2_lidar_topic" default="/livox/lidar" />
+  <arg name="image_topic" default="/left_camera/image" />
+  <arg name="imu_topic" default="/livox/imu" />
+  <arg name="restamp_sensor_time" default="false" />
+  <arg name="pcd_save_en" default="true" />
+  <arg name="pcd_save_type" default="0" />
+  <arg name="pcd_save_interval" default="-1" />
+  <arg name="pcd_filter_size" default="0.15" />
+  <arg name="colmap_output_en" default="true" />
+  <arg name="img_save_en" default="true" />
+  <arg name="img_save_interval" default="1" />
+  <arg name="pose_output_en" default="true" />
+
+  <rosparam command="load" file="$(find fast_livo)/config/mid360.yaml" />
+  <param name="common/lid_topic" value="$(arg lidar_topic)" />
+  <param name="common/img_topic" value="$(arg image_topic)" />
+  <param name="common/imu_topic" value="$(arg imu_topic)" />
+  <param name="pcd_save/pcd_save_en" value="$(arg pcd_save_en)" />
+  <param name="pcd_save/type" value="$(arg pcd_save_type)" />
+  <param name="pcd_save/interval" value="$(arg pcd_save_interval)" />
+  <param name="pcd_save/filter_size_pcd" value="$(arg pcd_filter_size)" />
+  <param name="pcd_save/colmap_output_en" value="$(arg colmap_output_en)" />
+  <param name="image_save/img_save_en" value="$(arg img_save_en)" />
+  <param name="image_save/interval" value="$(arg img_save_interval)" />
+  <param name="evo/pose_output_en" value="$(arg pose_output_en)" />
+
+  <node pkg="jr_fastlivo_validation"
+        type="livox_driver2_to_legacy"
+        name="livox_driver2_to_legacy"
+        output="screen">
+    <param name="input_topic" value="$(arg driver2_lidar_topic)" />
+    <param name="output_topic" value="$(arg lidar_topic)" />
+    <param name="restamp_header" value="$(arg restamp_sensor_time)" />
+  </node>
+
+  <group if="$(arg restamp_sensor_time)">
+    <param name="common/imu_topic" value="/livox/imu_ros_time" />
+    <node pkg="jr_fastlivo_validation"
+          type="imu_restamp"
+          name="imu_restamp"
+          output="screen">
+      <param name="input_topic" value="$(arg imu_topic)" />
+      <param name="output_topic" value="/livox/imu_ros_time" />
+    </node>
+  </group>
+
+  <node pkg="fast_livo"
+        type="fastlivo_mapping"
+        name="laserMapping"
+        output="screen">
+    <rosparam file="$(find fast_livo)/config/camera_pinhole.yaml" />
+  </node>
+
+  <group if="$(arg rviz)">
+    <node launch-prefix="nice"
+          pkg="rviz"
+          type="rviz"
+          name="rviz"
+          args="-d $(find fast_livo)/rviz_cfg/fast_livo2.rviz" />
+  </group>
+</launch>

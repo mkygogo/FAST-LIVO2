@@ -1,0 +1,15 @@
+<launch>
+<!-- Launch file for JR Livox Mid360 + Hikrobot FAST-LIVO2 mapping -->
+
+  <arg name="rviz" default="true" />
+
+  <rosparam command="load" file="$(find fast_livo)/config/mid360.yaml" />
+
+  <node pkg="fast_livo" type="fastlivo_mapping" name="laserMapping" output="screen">
+    <rosparam file="$(find fast_livo)/config/camera_pinhole.yaml" />
+  </node>
+
+  <group if="$(arg rviz)">
+    <node launch-prefix="nice" pkg="rviz" type="rviz" name="rviz" args="-d $(find fast_livo)/rviz_cfg/fast_livo2.rviz" />
+  </group>
+</launch>

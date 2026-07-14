@@ -22,3 +22,29 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Local agent/editor scratch and imported remote work
+.codex_tmp_gslivo/
+.kilo/
+.remote-edits/
+
+# Generated scan previews and comparison exports
+scan_outputs/
+*_render_compare_contact.png
+ssh_test.txt
+*.zip
+
+# Historical GS-LIVO experiments kept outside the supported LOD-3DGS path
+config/jr_mid360_gs_*.yaml
+fast_livo2_console/docs/gs_livo_official_workflow.md
+fast_livo2_console/scripts/replay_gs_livo_*.sh
+fast_livo2_console/scripts/setup_gs_livo_*.sh
+fast_livo2_console/scripts/replay_jr_mid360_bag.sh
+fast_livo2_console/launch/mapping_jr_mid360_official_baseline.launch
+fast_livo2_console/static/gs_*.html
+fast_livo2_console/static/vendor/gs_playcanvas_viewer.js
+fast_livo2_console/static/vendor/playcanvas.min.mjs
+fast_livo2_console/tools/*gs_livo*.py
+fast_livo2_console/tools/gs_viewer_server.py
+fast_livo2_console/tools/prepare_gs_training_dataset.py
+/tools/
+render_compare_contact.png

@@ -39,6 +39,7 @@ fast_livo2_console/
   tools/
     livox_power_control.cpp         Livox SDK2 helper for wake/idle control
     ros_image_stream.py             ROS Image to low-FPS JPEG JSON-line bridge
+    build_replay_pack.py            Build optional map trajectory replay assets
     map_viewer_server.py            Standalone HTTP server for offline PCD/PLY viewing
     pcd_to_ply.py                   Convert binary PCD with RGB fields to binary PLY
   patches/
@@ -72,6 +73,10 @@ Map viewer deployment path (port 18180):
 The map viewer process uses `--viewer` pointing to the HTML in the same directory.
 When deploying a new `map_viewer.html`, copy to the `map_viewer/` directory, not
 `console/static/`.
+
+The map viewer server is deployed separately as `jr-map-viewer.service` on port
+18180. Changes to its Python server require restarting that service; HTML changes
+are read on each request.
 
 Systemd service:
 
@@ -376,6 +381,15 @@ Before uploading:
    directories, and helper binaries compiled on the mini PC.
 5. If the remote mini PC has newer files, copy them back into this repository
    before committing.
+
+The repository intentionally excludes local agent scratch directories, remote
+edit snapshots, scan outputs, screenshots, archives, and historical GS-LIVO
+experiment files. The supported Gaussian workflow is the external LOD-3DGS tree
+described above.
+
+Keep commits focused on source, launch files, configuration, documentation, and
+small static assets. Do not add bags, PCD/PLY outputs, generated replay packs,
+build directories, Python caches, or GPU training outputs.
 
 ## SSH Deployment from Dev Machine
 
