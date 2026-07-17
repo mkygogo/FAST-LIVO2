@@ -499,6 +499,300 @@ main {
   font-weight: 650;
 }
 
+/* Camera debug is a touch-first video canvas on the small operator screen. */
+.camera-page {
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.camera-debug-shell {
+  overflow: hidden;
+  border: 1px solid #273746;
+  border-radius: 14px;
+  background: #0b1118;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, .16);
+}
+
+.camera-debug-frame {
+  position: relative;
+  height: min(68vh, 720px);
+  min-height: 420px;
+  border: 0;
+  border-radius: 0;
+  background: #05090d;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.camera-debug-frame img {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  object-fit: contain;
+}
+
+.camera-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  color: #fff;
+  background: linear-gradient(180deg, rgba(0, 0, 0, .68), transparent);
+}
+
+.camera-overlay-top { top: 0; align-items: flex-start; }
+.camera-overlay-bottom {
+  bottom: 0;
+  display: grid;
+  gap: 8px;
+  background: linear-gradient(0deg, rgba(0, 0, 0, .82), transparent);
+}
+
+.camera-overlay strong,
+.camera-overlay span { color: #fff; }
+.camera-overlay-top strong { display: block; font-size: 17px; }
+.camera-overlay-top span { font-size: 12px; opacity: .82; }
+
+.icon-button {
+  min-width: 48px;
+  min-height: 48px;
+  padding: 0;
+  border-color: rgba(255, 255, 255, .35);
+  background: rgba(0, 0, 0, .45);
+  color: #fff;
+  font-size: 26px;
+}
+
+.camera-quick-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.camera-quick-actions button,
+.camera-presets button,
+.camera-settings-actions button {
+  min-height: 50px;
+  padding: 0 12px;
+  font-size: 16px;
+}
+
+.camera-presets button {
+  display: grid;
+  align-content: center;
+  gap: 2px;
+}
+
+.camera-presets button strong,
+.camera-presets button small { display: block; color: inherit; }
+.camera-presets button small { font-size: 12px; font-weight: 600; opacity: .82; }
+
+.camera-status-line {
+  display: flex;
+  gap: 14px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.camera-status-line span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.camera-control-dock {
+  padding: 12px;
+  background: #111b24;
+  color: #fff;
+}
+
+.camera-dock-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.camera-dock-head strong,
+.camera-dock-head span { display: block; color: #fff; }
+.camera-dock-head span { margin-top: 2px; font-size: 12px; opacity: .7; }
+.dock-toggle { min-height: 44px; padding: 0 12px; color: #fff; background: #20303d; border-color: #395063; }
+
+.camera-auto-panel {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 10px;
+  border: 1px solid #344958;
+  border-radius: 10px;
+  background: #17242f;
+}
+
+.camera-auto-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.camera-auto-status strong,
+.camera-auto-status span { color: #fff; }
+.camera-auto-status span { font-size: 13px; color: #9fe3bd; text-align: right; }
+.camera-auto-panel > small { color: #aebdc7; line-height: 1.35; }
+
+.camera-exposure-modes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.camera-exposure-modes button {
+  min-height: 52px;
+  padding: 0 8px;
+  color: #e7f0f5;
+  background: #20303d;
+  border-color: #496173;
+  font-size: 15px;
+}
+
+.camera-exposure-modes button.active {
+  color: #07150d;
+  background: #73d99d;
+  border-color: #73d99d;
+  box-shadow: 0 0 0 2px rgba(115, 217, 157, .18);
+}
+
+.camera-control.disabled { opacity: .48; }
+
+.camera-presets {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.camera-settings-sheet {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #2c3d4b;
+}
+
+.camera-settings-meta {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 6px 10px;
+  margin-bottom: 12px;
+  font-size: 12px;
+}
+
+.camera-settings-meta span { color: #9eb0bd; }
+.camera-settings-meta strong { color: #e8f0f4; overflow-wrap: anywhere; }
+.camera-read-config {
+  width: 100%;
+  min-height: 44px;
+  margin-bottom: 12px;
+  color: #dce8ef;
+  background: #20303d;
+  border-color: #395063;
+  font-size: 14px;
+}
+.camera-settings-sheet .camera-control { background: #17242f; border-color: #344958; }
+.camera-settings-sheet .camera-control-title { color: #fff; }
+.camera-settings-sheet .camera-control select { background: #0d151c; color: #fff; border-color: #496173; }
+.camera-settings-sheet .data-hint { color: #aebdc7; }
+.camera-control-help { color: #aebdc7; font-size: 12px; line-height: 1.35; }
+
+.camera-settings-actions {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 8px;
+  margin-top: 12px;
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  padding: 8px 0;
+  background: #111b24;
+}
+
+.camera-pending-hint {
+  margin: 2px 0 0;
+  color: #9fb1bd;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.camera-pending-hint.pending { color: #ffd166; }
+.camera-settings-actions.pending #applyCameraConfig {
+  background: #f59e0b;
+  border-color: #f59e0b;
+  color: #201400;
+}
+
+.camera-maintenance {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #2c3d4b;
+  color: #aebdc7;
+  font-size: 12px;
+}
+
+.camera-maintenance div { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.camera-maintenance button { min-height: 44px; font-size: 14px; }
+
+.camera-debug-frame:fullscreen,
+.camera-debug-frame:-webkit-full-screen {
+  width: 100vw;
+  height: 100vh;
+  border-radius: 0;
+}
+
+.camera-debug-shell:fullscreen,
+.camera-debug-shell:-webkit-full-screen {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+  border: 0;
+  border-radius: 0;
+}
+
+.camera-debug-shell:fullscreen .camera-debug-frame,
+.camera-debug-shell:-webkit-full-screen .camera-debug-frame {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+
+.camera-debug-shell:fullscreen .camera-control-dock,
+.camera-debug-shell:-webkit-full-screen .camera-control-dock {
+  flex: 0 0 auto;
+  max-height: 42vh;
+  overflow: auto;
+}
+
+@media (max-width: 760px) {
+  .camera-page { margin: -4px -4px 0; }
+  .camera-debug-shell { border-radius: 10px; }
+  .camera-debug-frame { height: min(62vh, 560px); min-height: 330px; }
+  .camera-overlay { padding: 10px; }
+  .camera-quick-actions button,
+  .camera-presets button { min-height: 52px; font-size: 15px; }
+  .camera-control-dock { padding: 10px; }
+}
+
+@media (orientation: landscape) and (max-height: 600px) {
+  .camera-debug-frame { height: calc(100vh - 112px); min-height: 280px; }
+  .camera-control-dock { padding: 8px 10px; }
+  .camera-presets button { min-height: 46px; }
+}
+
 .camera-controls {
   display: grid;
   gap: 14px;

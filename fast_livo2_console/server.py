@@ -723,7 +723,15 @@ CAMERA_CONFIG_DEFAULTS = {
     "Offset_y": 0,
     "FrameRateEnable": True,
     "FrameRate": 10,
-    "ExposureTime": 12000,
+    "ExposureTime": 6000,
+    "ExposureAutoString": "Off",
+    "AutoExposureTimeLowerLimit": 100,
+    "AutoExposureTimeUpperLimit": 10000,
+    "AutoExposureAOIUsageIntensity": True,
+    "AutoExposureAOIWidth": 960,
+    "AutoExposureAOIHeight": 768,
+    "AutoExposureAOIOffsetX": 160,
+    "AutoExposureAOIOffsetY": 128,
     "GammaEnable": True,
     "Gamma": 0.7,
     "GainAuto": 2,
@@ -735,8 +743,10 @@ CAMERA_CONFIG_DEFAULTS = {
 CAMERA_PRESETS = {
     "indoor": {
         "label": "室内",
-        "ExposureTime": 20000,
-        "GainAuto": 2,
+        "description": "普通室内：压住灯光高光并保留暗部",
+        "ExposureTime": 6000,
+        "ExposureAutoString": "Off",
+        "GainAuto": 0,
         "GammaEnable": True,
         "Gamma": 0.7,
         "FrameRate": 10,
@@ -744,7 +754,9 @@ CAMERA_PRESETS = {
     },
     "outdoor": {
         "label": "室外",
+        "description": "普通日光：缩短曝光，自动增益",
         "ExposureTime": 2000,
+        "ExposureAutoString": "Off",
         "GainAuto": 2,
         "GammaEnable": True,
         "Gamma": 0.7,
@@ -753,7 +765,9 @@ CAMERA_PRESETS = {
     },
     "outdoor_bright": {
         "label": "强光",
+        "description": "强光环境：极短曝光，固定增益",
         "ExposureTime": 800,
+        "ExposureAutoString": "Off",
         "GainAuto": 0,
         "GammaEnable": True,
         "Gamma": 0.7,
@@ -774,7 +788,8 @@ def _yaml_scalar(value):
     if value is None:
         return "null"
     text = str(value)
-    if re.search(r'[:#\[\]{},&*!|>\'"%@`]', text) or text.strip() != text:
+    yaml_keywords = {"true", "false", "yes", "no", "on", "off", "null", "~"}
+    if text.lower() in yaml_keywords or re.search(r'[:#\[\]{},&*!|>\'"%@`]', text) or text.strip() != text:
         return json.dumps(text, ensure_ascii=False)
     return text
 
@@ -796,7 +811,11 @@ def parse_simple_yaml(path):
         if not key:
             continue
         low = value.lower()
-        if low in ("true", "yes", "on"):
+        if key.endswith("String"):
+            data[key] = value[1:-1] if ((value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'"))) else value
+        elif (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            data[key] = value[1:-1]
+        elif low in ("true", "yes", "on"):
             data[key] = True
         elif low in ("false", "no", "off"):
             data[key] = False
@@ -804,8 +823,6 @@ def parse_simple_yaml(path):
             data[key] = int(value)
         elif re.fullmatch(r"-?\d+\.\d+", value):
             data[key] = float(value)
-        elif (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
-            data[key] = value[1:-1]
         else:
             data[key] = value
     return data, None
@@ -828,6 +845,14 @@ def write_camera_config_yaml(path, params):
         "FrameRateEnable",
         "FrameRate",
         "ExposureTime",
+        "ExposureAutoString",
+        "AutoExposureTimeLowerLimit",
+        "AutoExposureTimeUpperLimit",
+        "AutoExposureAOIUsageIntensity",
+        "AutoExposureAOIWidth",
+        "AutoExposureAOIHeight",
+        "AutoExposureAOIOffsetX",
+        "AutoExposureAOIOffsetY",
         "GammaEnable",
         "Gamma",
         "GainAuto",
@@ -888,6 +913,21 @@ def normalize_camera_params(raw):
             return default
         return max(lo, min(hi, val))
 
+    mode = str(raw.get("ExposureAutoString", base["ExposureAutoString"])).strip().lower()
+    mode = {"off": "Off", "once": "Once", "continuous": "Continuous"}.get(mode)
+    if mode is None:
+        errors.append("ExposureAutoString: expected Off, Once or Continuous")
+        mode = "Off"
+
+    lower = as_int("AutoExposureTimeLowerLimit", base["AutoExposureTimeLowerLimit"], 9, 10000)
+    upper = as_int("AutoExposureTimeUpperLimit", base["AutoExposureTimeUpperLimit"], 10, 10000)
+    if upper <= lower:
+        errors.append("AutoExposureTimeUpperLimit: must be greater than lower limit")
+        upper = min(10000, lower + 1)
+
+    def aligned_int(key, default, lo, hi):
+        return (as_int(key, default, lo, hi) // 4) * 4
+
     out = {
         "width": as_int("width", base["width"], 320, 4096),
         "height": as_int("height", base["height"], 240, 4096),
@@ -896,6 +936,16 @@ def normalize_camera_params(raw):
         "FrameRateEnable": as_bool("FrameRateEnable", base["FrameRateEnable"]),
         "FrameRate": as_int("FrameRate", base["FrameRate"], 1, 60),
         "ExposureTime": as_int("ExposureTime", base["ExposureTime"], 50, 100000),
+        "ExposureAutoString": mode,
+        "AutoExposureTimeLowerLimit": lower,
+        "AutoExposureTimeUpperLimit": upper,
+        "AutoExposureAOIUsageIntensity": as_bool(
+            "AutoExposureAOIUsageIntensity", base["AutoExposureAOIUsageIntensity"]
+        ),
+        "AutoExposureAOIWidth": aligned_int("AutoExposureAOIWidth", base["AutoExposureAOIWidth"], 32, 4096),
+        "AutoExposureAOIHeight": aligned_int("AutoExposureAOIHeight", base["AutoExposureAOIHeight"], 32, 4096),
+        "AutoExposureAOIOffsetX": aligned_int("AutoExposureAOIOffsetX", base["AutoExposureAOIOffsetX"], 0, 4096),
+        "AutoExposureAOIOffsetY": aligned_int("AutoExposureAOIOffsetY", base["AutoExposureAOIOffsetY"], 0, 4096),
         "GammaEnable": as_bool("GammaEnable", base["GammaEnable"]),
         "Gamma": as_float("Gamma", base["Gamma"], 0.1, 4.0),
         "GainAuto": as_int("GainAuto", base["GainAuto"], 0, 2),
@@ -903,6 +953,8 @@ def normalize_camera_params(raw):
         "Saturation": as_int("Saturation", base["Saturation"], 0, 255),
         "TriggerModeString": "Off",
     }
+    if mode != "Off":
+        out["GainAuto"] = 0
     return out, errors
 
 
@@ -925,12 +977,18 @@ def camera_config_status():
         "running": running,
         "camera_running": bool(running),
         "presets": {
-            key: {"label": val["label"], "params": {k: v for k, v in val.items() if k != "label"}}
+            key: {
+                "label": val["label"],
+                "description": val.get("description", ""),
+                "params": {k: v for k, v in val.items() if k not in ("label", "description")},
+            }
             for key, val in CAMERA_PRESETS.items()
         },
-        "note": "参数在相机驱动启动时写入设备；应用后会重启 hikrobot_camera。",
+        "note": "相机通常由开始建图流程自动启动；启动/停止仅用于异常排查。参数应用后会重启 hikrobot_camera。",
         "limits": {
             "ExposureTime": {"min": 50, "max": 100000, "unit": "us"},
+            "ExposureAutoString": {"values": ["Off", "Once", "Continuous"]},
+            "AutoExposureTime": {"min": 9, "max": 10000, "unit": "us"},
             "FrameRate": {"min": 1, "max": 60},
             "Gamma": {"min": 0.1, "max": 4.0},
             "GainAuto": {"values": {"0": "Off", "1": "Once", "2": "Continuous"}},
@@ -1089,6 +1147,18 @@ def action_fastlivo_start_all():
     lio_stop = action_lio_stop()
     lidar = action_lidar_start()
     time.sleep(1)
+    mapping_camera = camera_config_status()["params"]
+    mapping_camera.update({
+        "ExposureAutoString": "Once",
+        "AutoExposureTimeLowerLimit": 100,
+        "AutoExposureTimeUpperLimit": 10000,
+        "GainAuto": 0,
+    })
+    mapping_camera, _ = normalize_camera_params(mapping_camera)
+    write_camera_config_yaml(CAMERA_CONFIG_PATH, mapping_camera)
+    # A hardware Once cycle starts only when the camera process starts. Restart
+    # even if an operator left the debug camera running before beginning a scan.
+    camera_stop = action_camera_stop()
     camera = action_camera_start()
     time.sleep(1)
     mapping = action_fastlivo_start()
@@ -1096,6 +1166,7 @@ def action_fastlivo_start_all():
         "ok": bool(lidar.get("ok") and camera.get("ok") and mapping.get("ok")),
         "lio_stop": lio_stop,
         "lidar": lidar,
+        "camera_stop": camera_stop,
         "camera": camera,
         "mapping": mapping,
         "scan_dir": mapping.get("scan_dir"),
@@ -1349,11 +1420,14 @@ async def stream_points(writer, mode, quality):
 async def stream_camera(writer, quality):
     ensure_dirs()
     safe_quality = quality if quality in ("mini", "pc") else "mini"
-    width = "480" if safe_quality == "mini" else "720"
-    hz = "4" if safe_quality == "mini" else "6"
+    # Hikrobot publishes 1280x1024. Preserve the source resolution for the
+    # touch console; quality mode only changes preview frame rate/JPEG quality.
+    width = "1280"
+    hz = "5" if safe_quality == "mini" else "8"
+    jpeg_quality = "78" if safe_quality == "mini" else "84"
     inner = (
         "python3 /home/jr/fast_livo2_data/tools/ros_image_stream.py "
-        f"--topics /rgb_img,/left_camera/image --hz {hz} --width {width} --quality 72"
+        f"--topics /rgb_img,/left_camera/image --hz {hz} --width {width} --quality {jpeg_quality}"
     )
     current = {row["name"] for row in docker_ps()}
     if not any(name in current for name in CONTAINERS["camera"]):

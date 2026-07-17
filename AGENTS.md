@@ -45,6 +45,8 @@ fast_livo2_console/
   patches/
     fast_lio_livox_ros_driver2.patch
                                     Patch for mkygogo/FAST_LIO integration
+    hikrobot_camera_auto_exposure.patch
+                                    Hardware auto-exposure patch for Hikrobot driver
   docs/
     fast_lio_integration.md         How FAST_LIO is integrated
 ```
@@ -196,6 +198,42 @@ Keep the UI model simple for the touch-screen operator:
   mapping is active (via `docker exec` + `pkill`), then stop any remaining
   helper containers.
 - Do not put LiDAR-only FAST_LIO controls back on the `建图` page.
+
+## Hikrobot Automatic Exposure
+
+The `MV-CA013-A0UC` camera supports hardware exposure modes `Off`, `Once`, and
+`Continuous`. The touch console exposes all three under `相机调试`; changing the
+mode rewrites the camera YAML and restarts only the camera container (about two
+seconds). Manual indoor/outdoor/bright presets always switch exposure back to
+`Off`.
+
+Production `开始建图` writes `ExposureAutoString: Once` before starting the
+camera. Default hardware-auto settings are:
+
+```text
+AutoExposureTimeLowerLimit: 100 us
+AutoExposureTimeUpperLimit: 10000 us
+AutoFunctionAOI: 960x768 +160+128 (center of the 1280x1024 image)
+GainAuto: Off
+```
+
+The camera does not expose a usable target-brightness node, so do not add one to
+the UI. If central AOI programming fails, the driver warns and falls back to the
+full image. If the exposure limits or auto mode cannot be programmed, the driver
+refuses hardware auto exposure and returns to fixed manual exposure.
+
+The deployed driver source is modified by:
+
+```text
+fast_livo2_console/patches/hikrobot_camera_auto_exposure.patch
+```
+
+Apply this after the existing Hikrobot trigger/timestamp integration in
+`~/fast_livo2_ws/src/HIKROBOT-MVS-CAMERA-ROS`. On this USB camera,
+`MV_FRAME_OUT_INFO_EX.fExposureTime` is always zero; the driver must query the
+`ExposureTime` node and publish that value in `/hikrobot_camera/frame_info`.
+`ros_image_stream.py` attaches the latest value to `/ws/camera` image messages
+as `exposure_us`.
 
 Official FAST-LIVO2 saved maps are copied into:
 

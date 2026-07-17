@@ -2,6 +2,7 @@
 import argparse
 import base64
 import json
+import re
 import sys
 import time
 
@@ -9,6 +10,7 @@ import cv2
 import numpy as np
 import rospy
 from sensor_msgs.msg import Image
+from std_msgs.msg import String
 
 try:
     from cv_bridge import CvBridge
@@ -30,6 +32,8 @@ class ImageStreamer:
         self.started = time.time()
         self.last_image = 0.0
         self.last_warn = 0.0
+        self.last_exposure_us = None
+        self.last_frame_info = 0.0
 
     def write(self, obj):
         sys.stdout.write(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -90,7 +94,7 @@ class ImageStreamer:
             ok, encoded = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), self.quality])
             if not ok:
                 raise RuntimeError("jpeg encode failed")
-            self.write({
+            payload = {
                 "type": "image",
                 "topic": topic,
                 "frame": getattr(msg.header, "frame_id", ""),
@@ -99,14 +103,24 @@ class ImageStreamer:
                 "height": int(img.shape[0]),
                 "encoding": "jpeg",
                 "data": base64.b64encode(encoded.tobytes()).decode("ascii"),
-            })
+            }
+            if self.last_exposure_us is not None and time.time() - self.last_frame_info <= 2.0:
+                payload["exposure_us"] = round(self.last_exposure_us, 3)
+            self.write(payload)
         except Exception as exc:
             self.write({"type": "status", "level": "warn", "message": str(exc), "topic": topic})
+
+    def frame_info_cb(self, msg):
+        match = re.search(r"(?:^|\s)exposure_us=([0-9]+(?:\.[0-9]+)?)", msg.data or "")
+        if match:
+            self.last_exposure_us = float(match.group(1))
+            self.last_frame_info = time.time()
 
     def subscribe(self):
         self.write({"type": "status", "level": "info", "message": "ROS image stream connected", "topics": self.topics})
         for topic in self.topics:
             rospy.Subscriber(topic, Image, lambda msg, t=topic: self.image_cb(t, msg), queue_size=1)
+        rospy.Subscriber("/hikrobot_camera/frame_info", String, self.frame_info_cb, queue_size=5)
 
     def heartbeat(self):
         now = time.time()

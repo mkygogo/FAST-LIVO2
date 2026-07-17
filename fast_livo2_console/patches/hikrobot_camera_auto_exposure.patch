@@ -1,0 +1,172 @@
+--- a/include/hikrobot_camera.hpp
++++ b/include/hikrobot_camera.hpp
+@@ -71,6 +71,7 @@
+         bool PrintDeviceInfo(MV_CC_DEVICE_INFO *pstMVDevInfo);
+         //********** 设置摄像头参数 ***********************/
+         bool set(camera::CamerProperties type, float value);
++        bool configureExposure();
+         //********** 恢复默认参数 *************************/
+         bool reset();
+         //********** 读图10个相机的原始图像 ********************************/
+@@ -92,6 +93,14 @@
+         int FrameRate;
+         int BurstFrameCount;
+         int ExposureTime;
++        std::string ExposureAutoString;
++        float AutoExposureTimeLowerLimit;
++        float AutoExposureTimeUpperLimit;
++        bool AutoExposureAOIUsageIntensity;
++        int AutoExposureAOIWidth;
++        int AutoExposureAOIHeight;
++        int AutoExposureAOIOffsetX;
++        int AutoExposureAOIOffsetY;
+         bool GammaEnable;
+         float Gamma;
+         int GainAuto;
+@@ -119,6 +128,14 @@
+         node.param("FrameRate", FrameRate, 10);
+         node.param("BurstFrameCount", BurstFrameCount, 10); // 一次触发采集的次数
+         node.param("ExposureTime", ExposureTime, 50000);
++        node.param<std::string>("ExposureAutoString", ExposureAutoString, "Off");
++        node.param("AutoExposureTimeLowerLimit", AutoExposureTimeLowerLimit, (float)100.0);
++        node.param("AutoExposureTimeUpperLimit", AutoExposureTimeUpperLimit, (float)10000.0);
++        node.param("AutoExposureAOIUsageIntensity", AutoExposureAOIUsageIntensity, true);
++        node.param("AutoExposureAOIWidth", AutoExposureAOIWidth, 960);
++        node.param("AutoExposureAOIHeight", AutoExposureAOIHeight, 768);
++        node.param("AutoExposureAOIOffsetX", AutoExposureAOIOffsetX, 160);
++        node.param("AutoExposureAOIOffsetY", AutoExposureAOIOffsetY, 128);
+         node.param("GammaEnable", GammaEnable, false);
+         node.param("Gamma", Gamma, (float)0.7);
+         node.param("GainAuto", GainAuto, 2);
+@@ -193,13 +210,14 @@
+         this->set(CAP_PROP_WIDTH, width);
+         this->set(CAP_PROP_OFFSETX, Offset_x);
+         this->set(CAP_PROP_OFFSETY, Offset_y);
+-        this->set(CAP_PROP_EXPOSURE_TIME, ExposureTime);
++        configureExposure();
+         // printf("\n%d\n",GammaEnable);
+         this->set(CAP_PROP_GAMMA_ENABLE, GammaEnable);
+         // printf("\n%d\n",GammaEnable);
+         if (GammaEnable)
+             this->set(CAP_PROP_GAMMA, Gamma);
+-        this->set(CAP_PROP_GAINAUTO, GainAuto);
++        if (ExposureAutoString == "Off")
++            this->set(CAP_PROP_GAINAUTO, GainAuto);
+         if (!LineSelectorString.empty())
+         {
+             nRet = MV_CC_SetEnumValueByString(handle, "LineSelector", LineSelectorString.c_str());
+@@ -634,6 +652,79 @@
+         return nRet;
+     }
+-
++
++    bool Camera::configureExposure()
++    {
++        if (ExposureAutoString != "Off" && ExposureAutoString != "Once" && ExposureAutoString != "Continuous")
++        {
++            ROS_ERROR("Unsupported ExposureAutoString '%s'; falling back to manual exposure", ExposureAutoString.c_str());
++            ExposureAutoString = "Off";
++        }
++
++        nRet = MV_CC_SetEnumValueByString(handle, "ExposureAuto", "Off");
++        if (MV_OK != nRet)
++        {
++            ROS_ERROR("Cannot disable ExposureAuto, ret=[%x]", nRet);
++            return false;
++        }
++
++        if (ExposureAutoString == "Off")
++        {
++            this->set(CAP_PROP_EXPOSURE_TIME, ExposureTime);
++            return nRet == MV_OK;
++        }
++
++        nRet = MV_CC_SetEnumValueByString(handle, "GainAuto", "Off");
++        if (MV_OK != nRet)
++        {
++            ROS_ERROR("Cannot force GainAuto=Off for automatic exposure, ret=[%x]", nRet);
++            ExposureAutoString = "Off";
++            this->set(CAP_PROP_EXPOSURE_TIME, ExposureTime);
++            return false;
++        }
++
++        bool aoi_ok = true;
++        aoi_ok = MV_CC_SetEnumValue(handle, "AutoFunctionAOISelector", 0) == MV_OK && aoi_ok;
++        aoi_ok = MV_CC_SetIntValue(handle, "AutoFunctionAOIWidth", AutoExposureAOIWidth) == MV_OK && aoi_ok;
++        aoi_ok = MV_CC_SetIntValue(handle, "AutoFunctionAOIHeight", AutoExposureAOIHeight) == MV_OK && aoi_ok;
++        aoi_ok = MV_CC_SetIntValue(handle, "AutoFunctionAOIOffsetX", AutoExposureAOIOffsetX) == MV_OK && aoi_ok;
++        aoi_ok = MV_CC_SetIntValue(handle, "AutoFunctionAOIOffsetY", AutoExposureAOIOffsetY) == MV_OK && aoi_ok;
++        aoi_ok = MV_CC_SetBoolValue(handle, "AutoFunctionAOIUsageIntensity", AutoExposureAOIUsageIntensity) == MV_OK && aoi_ok;
++        if (!aoi_ok)
++        {
++            ROS_WARN("Central automatic-exposure AOI is unavailable; falling back to full image");
++            MV_CC_SetIntValue(handle, "AutoFunctionAOIOffsetX", 0);
++            MV_CC_SetIntValue(handle, "AutoFunctionAOIOffsetY", 0);
++            MV_CC_SetIntValue(handle, "AutoFunctionAOIWidth", width);
++            MV_CC_SetIntValue(handle, "AutoFunctionAOIHeight", height);
++            MV_CC_SetBoolValue(handle, "AutoFunctionAOIUsageIntensity", true);
++        }
++
++        int lower_ret = MV_CC_SetIntValue(handle, "AutoExposureTimeLowerLimit", (unsigned int)AutoExposureTimeLowerLimit);
++        int upper_ret = MV_CC_SetIntValue(handle, "AutoExposureTimeUpperLimit", (unsigned int)AutoExposureTimeUpperLimit);
++        if (MV_OK != lower_ret || MV_OK != upper_ret)
++        {
++            ROS_ERROR("Cannot set automatic exposure limits %.0f..%.0f us, ret=[%x,%x]; using manual exposure",
++                      AutoExposureTimeLowerLimit, AutoExposureTimeUpperLimit, lower_ret, upper_ret);
++            ExposureAutoString = "Off";
++            this->set(CAP_PROP_EXPOSURE_TIME, ExposureTime);
++            return false;
++        }
++
++        nRet = MV_CC_SetEnumValueByString(handle, "ExposureAuto", ExposureAutoString.c_str());
++        if (MV_OK != nRet)
++        {
++            ROS_ERROR("Cannot enable ExposureAuto=%s, ret=[%x]; using manual exposure", ExposureAutoString.c_str(), nRet);
++            ExposureAutoString = "Off";
++            MV_CC_SetEnumValueByString(handle, "ExposureAuto", "Off");
++            this->set(CAP_PROP_EXPOSURE_TIME, ExposureTime);
++            return false;
++        }
++        ROS_INFO("ExposureAuto=%s, limits=%.0f..%.0f us, AOI=%dx%d+%d+%d, GainAuto=Off",
++                 ExposureAutoString.c_str(), AutoExposureTimeLowerLimit, AutoExposureTimeUpperLimit,
++                 AutoExposureAOIWidth, AutoExposureAOIHeight, AutoExposureAOIOffsetX, AutoExposureAOIOffsetY);
++        return true;
++    }
++
+     //^ ********************************** Camera constructor************************************ //
+     bool Camera::reset()
+     {
+@@ -644,10 +735,11 @@
+         nRet = this->set(CAP_PROP_WIDTH, width) || nRet;
+         nRet = this->set(CAP_PROP_OFFSETX, Offset_x) || nRet;
+         nRet = this->set(CAP_PROP_OFFSETY, Offset_y) || nRet;
+-        nRet = this->set(CAP_PROP_EXPOSURE_TIME, ExposureTime) || nRet;
++        nRet = (!configureExposure()) || nRet;
+         nRet = this->set(CAP_PROP_GAMMA_ENABLE, GammaEnable) || nRet;
+         nRet = this->set(CAP_PROP_GAMMA, Gamma) || nRet;
+-        nRet = this->set(CAP_PROP_GAINAUTO, GainAuto) || nRet;
++        if (ExposureAutoString == "Off")
++            nRet = this->set(CAP_PROP_GAINAUTO, GainAuto) || nRet;
+         nRet = this->set(CAP_PROP_SATURATION_ENABLE, SaturationEnable) || nRet;
+         nRet = this->set(CAP_PROP_SATURATION, Saturation) || nRet;
+         nRet = this->set(CAP_PROP_TRIGGER_MODE, TriggerMode) || nRet;
+@@ -738,6 +830,10 @@
+             stConvertParam.nDstBufferSize = MAX_IMAGE_DATA_SIZE;        //ch:输出缓存大小 | en:output buffer size
+             stConvertParam.enSrcPixelType = stImageInfo.enPixelType;    //ch:输入像素格式 | en:input pixel format                       //! 输入格式 RGB
+             MV_CC_ConvertPixelType(p_handle, &stConvertParam);
++            MVCC_FLOATVALUE exposure_value = {0};
++            float actual_exposure = stImageInfo.fExposureTime;
++            if (MV_OK == MV_CC_GetFloatValue(p_handle, "ExposureTime", &exposure_value))
++                actual_exposure = exposure_value.fCurValue;
+             pthread_mutex_lock(&mutex);
+             camera::frame = cv::Mat(stImageInfo.nHeight, stImageInfo.nWidth, CV_8UC3, m_pBufForSaveImage).clone(); //tmp.clone();
+             camera::frame_meta.frame_num = stImageInfo.nFrameNum;
+@@ -747,7 +843,7 @@
+             camera::frame_meta.host_timestamp = stImageInfo.nHostTimeStamp;
+             camera::frame_meta.input = stImageInfo.nInput;
+             camera::frame_meta.output = stImageInfo.nOutput;
+-            camera::frame_meta.exposure_time = stImageInfo.fExposureTime;
++            camera::frame_meta.exposure_time = actual_exposure;
+             camera::frame_meta.valid = true;
+             frame_empty = 0;
+             pthread_mutex_unlock(&mutex);

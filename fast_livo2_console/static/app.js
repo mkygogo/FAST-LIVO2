@@ -3,6 +3,10 @@ const $ = (id) => document.getElementById(id);
 let statusTimer = null;
 let pointWs = null;
 let cameraWs = null;
+let cameraReconnectTimer = null;
+let cameraExposureMode = "Off";
+let cameraExposureLast = null;
+let cameraExposureStableFrames = 0;
 let scanState = "idle";
 let sceneMode = "live";
 let qualityMode = localStorage.getItem("jr.preview.quality") || "mini";
@@ -175,6 +179,32 @@ function showTab(id) {
   }
 }
 
+function toggleCameraSettings() {
+  const sheet = $("cameraSettingsSheet");
+  const button = $("cameraSettingsToggle");
+  if (!sheet || !button) return;
+  sheet.hidden = !sheet.hidden;
+  button.setAttribute("aria-expanded", String(!sheet.hidden));
+  button.textContent = sheet.hidden ? "更多参数⌄" : "收起参数⌃";
+}
+
+async function toggleCameraFullscreen() {
+  const shell = document.querySelector(".camera-debug-shell");
+  if (!shell) return;
+  try {
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      if (document.exitFullscreen) await document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+      return;
+    }
+    if (shell.requestFullscreen) await shell.requestFullscreen();
+    else if (shell.webkitRequestFullscreen) shell.webkitRequestFullscreen();
+    else toast("当前浏览器不支持全屏");
+  } catch (err) {
+    toast(`全屏失败: ${err.message}`);
+  }
+}
+
 function syncCameraControlOutputs() {
   const exp = $("camExposure");
   const fr = $("camFrameRate");
@@ -186,10 +216,32 @@ function syncCameraControlOutputs() {
   if (sat && $("camSaturationValue")) $("camSaturationValue").textContent = String(sat.value);
 }
 
+function setCameraConfigDirty(dirty) {
+  const hint = $("cameraPendingHint");
+  const actions = document.querySelector(".camera-settings-actions");
+  const apply = $("applyCameraConfig");
+  hint?.classList.toggle("pending", dirty);
+  actions?.classList.toggle("pending", dirty);
+  if (hint) {
+    hint.textContent = dirty
+      ? "参数尚未生效：需要点击“应用并重启相机”"
+      : "当前显示的是相机已生效参数";
+  }
+  if (apply) apply.textContent = dirty ? "应用并重启（有修改）" : "应用并重启相机";
+}
+
 function readCameraFormParams() {
   return {
-    ExposureTime: Number($("camExposure")?.value || 12000),
-    GainAuto: Number($("camGainAuto")?.value || 2),
+    ExposureTime: Number($("camExposure")?.value || 6000),
+    ExposureAutoString: cameraExposureMode,
+    AutoExposureTimeLowerLimit: 100,
+    AutoExposureTimeUpperLimit: 10000,
+    AutoExposureAOIUsageIntensity: true,
+    AutoExposureAOIWidth: 960,
+    AutoExposureAOIHeight: 768,
+    AutoExposureAOIOffsetX: 160,
+    AutoExposureAOIOffsetY: 128,
+    GainAuto: cameraExposureMode === "Off" ? Number($("camGainAuto")?.value || 0) : 0,
     FrameRate: Number($("camFrameRate")?.value || 10),
     FrameRateEnable: Boolean($("camFrameRateEnable")?.checked),
     Gamma: Number($("camGamma")?.value || 0.7),
@@ -215,7 +267,76 @@ function fillCameraForm(params = {}) {
   setVal("camGammaEnable", params.GammaEnable);
   setVal("camSaturation", params.Saturation);
   setVal("camSaturationEnable", params.SaturationEnable);
+  const nextMode = params.ExposureAutoString || "Off";
+  setCameraExposureMode(nextMode, nextMode !== cameraExposureMode);
   syncCameraControlOutputs();
+}
+
+function setCameraExposureMode(mode, resetSamples = true) {
+  cameraExposureMode = ["Off", "Once", "Continuous"].includes(mode) ? mode : "Off";
+  if (resetSamples) {
+    cameraExposureLast = null;
+    cameraExposureStableFrames = 0;
+  }
+  document.querySelectorAll("[data-exposure-mode]").forEach((button) => {
+    const active = button.dataset.exposureMode === cameraExposureMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  document.querySelectorAll(".camera-manual-exposure input, .camera-manual-exposure select").forEach((control) => {
+    control.disabled = cameraExposureMode !== "Off";
+  });
+  document.querySelectorAll(".camera-manual-exposure").forEach((control) => {
+    control.classList.toggle("disabled", cameraExposureMode !== "Off");
+  });
+  const labels = {Off: "手动", Once: "自动一次 · 调节中", Continuous: "连续自动"};
+  setText("cameraExposureStatus", `${labels[cameraExposureMode]} · 等待曝光数据`);
+}
+
+function updateCameraExposure(exposureUs) {
+  const value = Number(exposureUs);
+  if (!Number.isFinite(value) || value <= 0) return;
+  if (cameraExposureMode === "Once") {
+    if (cameraExposureLast == null) cameraExposureStableFrames = 1;
+    else {
+      const change = Math.abs(value - cameraExposureLast) / Math.max(Math.abs(cameraExposureLast), 1);
+      cameraExposureStableFrames = change < 0.01 ? cameraExposureStableFrames + 1 : 1;
+    }
+  }
+  cameraExposureLast = value;
+  const formatted = value >= 1000 ? `${(value / 1000).toFixed(2)} ms` : `${value.toFixed(0)} µs`;
+  if (cameraExposureMode === "Once") {
+    setText("cameraExposureStatus", `自动一次 · ${cameraExposureStableFrames >= 5 ? "已锁定" : "调节中"} · ${formatted}`);
+  } else if (cameraExposureMode === "Continuous") {
+    setText("cameraExposureStatus", `连续自动 · ${formatted}`);
+  } else {
+    setText("cameraExposureStatus", `手动 · ${formatted}`);
+  }
+}
+
+async function applyCameraExposureMode(mode) {
+  if (!["Off", "Once", "Continuous"].includes(mode)) return;
+  setCameraExposureMode(mode);
+  const params = readCameraFormParams();
+  params.ExposureAutoString = mode;
+  if (mode !== "Off") params.GainAuto = 0;
+  toast("曝光方式切换中，相机会重启约 2 秒…");
+  try {
+    const res = await fetch("/api/camera/config", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({params, restart: true}),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.output || data.message || `HTTP ${res.status}`);
+    fillCameraForm(data.params || params);
+    setText("cameraRunState", "重启中/运行中");
+    closeCameraStream();
+    setTimeout(() => ensureCameraStream(), 1500);
+  } catch (err) {
+    toast(`曝光方式切换失败: ${err.message}`);
+    await refreshCameraConfig();
+  }
 }
 
 async function refreshCameraConfig() {
@@ -224,6 +345,7 @@ async function refreshCameraConfig() {
     const data = await res.json();
     if (!res.ok || data.ok === false) throw new Error(data.output || data.message || `HTTP ${res.status}`);
     fillCameraForm(data.params || {});
+    setCameraConfigDirty(false);
     setText("cameraConfigPath", data.path || "-");
     setText("cameraRunState", data.camera_running ? "运行中" : "未运行");
     if (data.note) setText("cameraConfigNote", data.note);
@@ -232,8 +354,13 @@ async function refreshCameraConfig() {
       const keys = Object.keys(data.presets);
       if (keys.length) {
         presetBox.innerHTML = keys.map((key) => {
-          const label = data.presets[key]?.label || key;
-          return `<button type="button" class="primary" data-camera-preset="${escapeHtml(key)}">${escapeHtml(label)}</button>`;
+          const preset = data.presets[key] || {};
+          const label = preset.label || key;
+          const params = preset.params || {};
+          const exposure = params.ExposureTime != null ? `${Number(params.ExposureTime) / 1000}ms` : "";
+          const gain = {0: "固定增益", 1: "一次自动", 2: "自动增益"}[params.GainAuto] || "";
+          const summary = [exposure, gain].filter(Boolean).join(" · ") || preset.description || "快速应用";
+          return `<button type="button" class="primary" data-camera-preset="${escapeHtml(key)}"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(summary)}</small></button>`;
         }).join("");
         presetBox.querySelectorAll("[data-camera-preset]").forEach((btn) => {
           btn.addEventListener("click", () => applyCameraPreset(btn.dataset.cameraPreset));
@@ -257,11 +384,13 @@ async function applyCameraConfig(restart = true) {
     const data = await res.json();
     if (!res.ok || data.ok === false) throw new Error(data.output || data.message || `HTTP ${res.status}`);
     fillCameraForm(data.params || params);
+    setCameraConfigDirty(!restart);
     setText("cameraRunState", restart ? "重启中/运行中" : ($("cameraRunState")?.textContent || "-"));
     toast(data.output || (restart ? "已应用并重启" : "已保存"));
     if (data.output) $("logBox").textContent = data.output;
     await refreshStatus();
     await refreshCameraConfig();
+    if (!restart) setCameraConfigDirty(true);
     if (restart) {
       setTimeout(() => {
         ensureCameraStream();
@@ -564,10 +693,20 @@ function closePointStream() {
 }
 
 function closeCameraStream() {
-  if (cameraWs) {
-    cameraWs.close();
-    cameraWs = null;
+  if (cameraReconnectTimer) {
+    clearTimeout(cameraReconnectTimer);
+    cameraReconnectTimer = null;
   }
+  if (cameraWs) {
+    const socket = cameraWs;
+    cameraWs = null;
+    socket.onclose = null;
+    socket.close();
+  }
+}
+
+function cameraStreamShouldReconnect() {
+  return Boolean($("camera")?.classList.contains("active") || scanState === "starting" || scanState === "scanning");
 }
 
 function ensurePointStream() {
@@ -592,15 +731,27 @@ function ensurePointStream() {
 
 function ensureCameraStream() {
   if (cameraWs) return;
-  cameraWs = new WebSocket(`${wsScheme()}://${location.host}/ws/camera?quality=${qualityMode}`);
-  cameraWs.onopen = () => setText("cameraMeta", "视频连接中");
-  cameraWs.onclose = () => {
-    cameraWs = null;
+  if (cameraReconnectTimer) {
+    clearTimeout(cameraReconnectTimer);
+    cameraReconnectTimer = null;
+  }
+  const socket = new WebSocket(`${wsScheme()}://${location.host}/ws/camera?quality=${qualityMode}`);
+  cameraWs = socket;
+  socket.onopen = () => setText("cameraMeta", "视频连接中");
+  socket.onclose = () => {
+    if (cameraWs === socket) cameraWs = null;
     setText("cameraMeta", "视频已断开");
     setText("cameraDebugMeta", "视频已断开");
+    if (cameraStreamShouldReconnect()) {
+      setText("cameraDebugMeta", "视频已断开，正在重连…");
+      cameraReconnectTimer = setTimeout(() => {
+        cameraReconnectTimer = null;
+        ensureCameraStream();
+      }, 1500);
+    }
   };
-  cameraWs.onerror = () => toast("视频连接失败");
-  cameraWs.onmessage = (event) => {
+  socket.onerror = () => setText("cameraDebugMeta", "视频连接失败，准备重连…");
+  socket.onmessage = (event) => {
     let msg;
     try {
       msg = JSON.parse(event.data);
@@ -625,6 +776,7 @@ function ensureCameraStream() {
       }
       if ($("cameraDebugEmpty")) $("cameraDebugEmpty").style.display = "none";
       setText("cameraDebugMeta", `${msg.topic || "image"} · ${msg.width || "?"}x${msg.height || "?"}`);
+      updateCameraExposure(msg.exposure_us);
     } else if ((msg.type === "rate" || msg.type === "rates") && msg.rates) {
       updateRates(msg.rates);
     } else if (msg.type === "status") {
@@ -1354,12 +1506,19 @@ function bindUi() {
   $("refreshCameraConfig")?.addEventListener("click", () => refreshCameraConfig());
   $("applyCameraConfig")?.addEventListener("click", () => applyCameraConfig(true));
   $("saveCameraConfigOnly")?.addEventListener("click", () => applyCameraConfig(false));
-  $("cameraPreviewConnect")?.addEventListener("click", () => {
-    ensureCameraStream();
-    toast("已连接相机预览");
+  $("cameraSettingsToggle")?.addEventListener("click", toggleCameraSettings);
+  $("cameraFullscreen")?.addEventListener("click", toggleCameraFullscreen);
+  document.querySelectorAll("[data-exposure-mode]").forEach((button) => {
+    button.addEventListener("click", () => applyCameraExposureMode(button.dataset.exposureMode));
   });
   ["camExposure", "camFrameRate", "camGamma", "camSaturation"].forEach((id) => {
-    $(id)?.addEventListener("input", syncCameraControlOutputs);
+    $(id)?.addEventListener("input", () => {
+      syncCameraControlOutputs();
+      setCameraConfigDirty(true);
+    });
+  });
+  ["camGainAuto", "camFrameRateEnable", "camGammaEnable", "camSaturationEnable"].forEach((id) => {
+    $(id)?.addEventListener("change", () => setCameraConfigDirty(true));
   });
   document.querySelectorAll("[data-camera-preset]").forEach((btn) => {
     btn.addEventListener("click", () => applyCameraPreset(btn.dataset.cameraPreset));
