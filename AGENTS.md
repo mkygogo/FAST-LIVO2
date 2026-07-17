@@ -465,6 +465,10 @@ Primary recorded data on the mini PC:
 /home/jr/fast_livo2_data/output/fast_livo2_maps/<YYYYMMDD-HHMMSS>/
   all_raw_points.pcd
   all_downsampled_points.pcd
+  image_poses.txt
+  images/                       Captured training images
+  calib/                        Camera and Mid360 calibration snapshots
+  colmap/sparse/0/              cameras.txt, images.txt, points3D.txt
   metadata.json
   ...
 
@@ -474,6 +478,13 @@ Primary recorded data on the mini PC:
 
 Console UI surfaces these under `数据管理` (maps only) and `设备概览` disk
 panel (maps + bags sizes).
+
+The exporter also keeps a complete working dataset under
+`output/gs_livo_datasets/<scan_id>/`. After export, `server.py` must mirror the
+training subset listed above back into the matching `fast_livo2_maps/<scan_id>`
+directory. Do not remove this archive step: the offline LOD-3DGS converter pulls
+the self-contained scan directory, while `gs_livo_datasets` is an intermediate
+working/export tree.
 
 ## Map Viewer Features
 

@@ -293,6 +293,67 @@ def export_gs_livo_dataset(scan_dir, raw_bag=None):
     return res
 
 
+def archive_exported_dataset(scan_dir, copied=None):
+    """Mirror training inputs into the saved map directory.
+
+    The exporter keeps its complete working copy under gs_livo_datasets.  The
+    scan archive also needs the operator-facing subset so a map directory is
+    self-contained and can be pulled by the offline LOD-3DGS converter.
+    """
+    target = pathlib.Path(scan_dir)
+    dataset = GS_DATASET_ROOT / target.name
+    copied = copied if copied is not None else []
+    errors = []
+    copy_count = 0
+
+    file_mappings = (
+        (dataset / "raw" / "image_poses.txt", target / "image_poses.txt"),
+        (dataset / "raw" / "camera_pinhole.yaml", target / "calib" / "camera_pinhole.yaml"),
+        (dataset / "raw" / "mid360.yaml", target / "calib" / "mid360.yaml"),
+    )
+    tree_mappings = (
+        (dataset / "colmap" / "images", target / "images"),
+        (dataset / "colmap" / "sparse", target / "colmap" / "sparse"),
+    )
+
+    try:
+        for src, dst in file_mappings:
+            if not src.is_file():
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            copied.append(str(dst))
+            copy_count += 1
+        for src_root, dst_root in tree_mappings:
+            if not src_root.is_dir():
+                continue
+            for src in sorted(path for path in src_root.rglob("*") if path.is_file()):
+                dst = dst_root / src.relative_to(src_root)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                copied.append(str(dst))
+                copy_count += 1
+    except Exception as exc:
+        errors.append(str(exc))
+
+    required = (
+        target / "image_poses.txt",
+        target / "images",
+        target / "calib" / "camera_pinhole.yaml",
+        target / "colmap" / "sparse" / "0" / "cameras.txt",
+        target / "colmap" / "sparse" / "0" / "images.txt",
+        target / "colmap" / "sparse" / "0" / "points3D.txt",
+    )
+    missing = [str(path) for path in required if not path.exists()]
+    return {
+        "ok": not errors and not missing,
+        "dataset_dir": str(dataset),
+        "copied_count": copy_count,
+        "missing": missing,
+        "errors": errors,
+    }
+
+
 def copy_fastlivo_outputs(scan_dir, extra_logs=None, raw_bag=None):
     ensure_dirs()
     target = pathlib.Path(scan_dir)
@@ -338,6 +399,8 @@ def copy_fastlivo_outputs(scan_dir, extra_logs=None, raw_bag=None):
         "metadata": gs_export.get("metadata"),
         "output": gs_export.get("output", "")[-4000:],
     }
+    metadata["dataset_archive"] = archive_exported_dataset(target, copied)
+    metadata["copied"] = list(dict.fromkeys(copied))
     (target / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     return metadata
 
