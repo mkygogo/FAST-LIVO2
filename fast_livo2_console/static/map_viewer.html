@@ -7,28 +7,60 @@
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; font-family: system-ui, sans-serif; color: #17202a; background: #eef1f4; }
-    header { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 16px; background: #fff; border-bottom: 1px solid #d6dde5; }
-    h1 { margin: 0; font-size: 20px; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 14px; background: #fff; border-bottom: 1px solid #d6dde5; }
+    h1 { margin: 0; font-size: 20px; white-space: nowrap; }
     main { display: grid; grid-template-columns: 320px 1fr; min-height: calc(100vh - 57px); }
     aside { border-right: 1px solid #d6dde5; background: #fff; overflow: auto; padding: 12px; }
-    button { min-height: 42px; border: 1px solid #cfd8e2; border-radius: 8px; background: #f8fafb; color: #17202a; font-weight: 700; }
+    button { min-height: 40px; border: 1px solid #cfd8e2; border-radius: 8px; background: #f8fafb; color: #17202a; font-weight: 700; cursor: pointer; }
     button.primary, button.active { background: #087f8c; border-color: #087f8c; color: #fff; }
     .map { border: 1px solid #d6dde5; border-radius: 8px; padding: 10px; margin-bottom: 10px; background: #f8fafb; }
     .map strong { display: block; margin-bottom: 8px; overflow-wrap: anywhere; }
     .files { display: grid; gap: 6px; }
     .files button { text-align: left; padding: 8px; font-size: 13px; }
-    .stage { position: relative; min-width: 0; background: #0f161d; overflow: hidden; }
-    canvas { display: block; width: 100%; height: calc(100vh - 57px); touch-action: none; }
-    .hud { position: absolute; left: 12px; top: 12px; max-width: min(820px, calc(100% - 24px)); padding: 10px 12px; border-radius: 8px; background: rgba(15,22,29,.84); color: #dbe7ef; font-size: 13px; overflow-wrap: anywhere; }
-    .tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-    .align { display: flex; align-items: center; gap: 6px; min-height: 42px; padding: 0 8px; border: 1px solid #cfd8e2; border-radius: 8px; background: #f8fafb; font-size: 13px; font-weight: 700; }
-    .align input { width: 150px; accent-color: #087f8c; }
-    .align output { min-width: 42px; text-align: right; }
+    .map-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 8px; }
+    .map-actions button { flex: 1 1 auto; min-width: 110px; }
+    .map-actions button.busy { opacity: .7; }
+    .stage { position: relative; min-width: 0; height: calc(100vh - 57px); background: #111820; overflow: hidden; }
+    #viewer { width: 100%; height: 100%; touch-action: none; }
+    #viewer canvas { display: block; width: 100%; height: 100%; }
+    .hud { position: absolute; left: 14px; top: 14px; max-width: min(900px, calc(100% - 28px)); padding: 8px 10px; border-radius: 8px; background: rgba(15,22,29,.78); color: #dbe7ef; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-line; pointer-events: none; }
+    .legend { position: absolute; left: 14px; bottom: 14px; padding: 8px 10px; border-radius: 8px; background: rgba(15,22,29,.72); color: #dbe7ef; font-size: 12px; line-height: 1.7; pointer-events: none; }
+    .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+    .tools { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+    .align { display: flex; align-items: center; gap: 6px; min-height: 40px; padding: 0 8px; border: 1px solid #cfd8e2; border-radius: 8px; background: #f8fafb; font-size: 13px; font-weight: 700; }
+    .align input { width: 132px; accent-color: #087f8c; }
+    .align output { min-width: 54px; text-align: right; }
     .nudge { min-width: 42px; padding: 0 10px; }
-    @media (max-width: 820px) {
+    .replay-badge {
+      display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 999px;
+      background: #d7f3ef; color: #0f6b63; font-size: 11px; font-weight: 800;
+    }
+    .replay-bar {
+      position: absolute; left: 14px; right: 14px; bottom: 14px; z-index: 5;
+      display: none; gap: 10px; align-items: center; flex-wrap: wrap;
+      padding: 10px 12px; border-radius: 10px; background: rgba(15, 22, 29, .86);
+      color: #dbe7ef; border: 1px solid rgba(148, 163, 184, .25);
+    }
+    .replay-bar.visible { display: flex; }
+    .replay-bar button { min-height: 36px; padding: 0 12px; }
+    .replay-bar button.active { background: #087f8c; border-color: #087f8c; color: #fff; }
+    .replay-bar input[type="range"] { flex: 1 1 180px; min-width: 140px; accent-color: #38bdf8; }
+    .replay-bar .time { min-width: 110px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .pip {
+      position: absolute; right: 14px; top: 14px; z-index: 5;
+      width: min(320px, 34vw); display: none; border-radius: 10px; overflow: hidden;
+      border: 1px solid rgba(148, 163, 184, .35); background: rgba(15, 22, 29, .9);
+      box-shadow: 0 10px 28px rgba(0, 0, 0, .35);
+    }
+    .pip.visible { display: block; }
+    .pip img { display: block; width: 100%; height: auto; background: #0b1016; min-height: 120px; object-fit: contain; }
+    .pip .pip-meta { padding: 6px 8px; font-size: 12px; color: #cbd5e1; font-weight: 650; }
+    @media (max-width: 920px) {
+      header { align-items: flex-start; flex-direction: column; }
       main { grid-template-columns: 1fr; }
-      aside { max-height: 220px; border-right: 0; border-bottom: 1px solid #d6dde5; }
-      canvas { height: calc(100vh - 277px); }
+      aside { max-height: 210px; border-right: 0; border-bottom: 1px solid #d6dde5; }
+      .stage { height: calc(100vh - 318px); min-height: 360px; }
+      .pip { width: min(220px, 46vw); top: auto; bottom: 86px; }
     }
   </style>
 </head>
@@ -39,85 +71,526 @@
       <button id="refresh">刷新</button>
       <button id="viewTop" class="active">俯视</button>
       <button id="viewFront">前视</button>
+      <button id="viewFree">自由查看</button>
       <button id="viewRoam">漫游</button>
-      <button id="axisX" class="nudge">X</button><button id="axisY" class="nudge">Y</button><button id="axisZ" class="nudge active">Z</button>
-      <button id="alignLeft" class="nudge" title="逆时针 1°（Shift=5°）">↶</button>
-      <label class="align">旋转 <input id="alignYaw" type="range" min="-180" max="180" step="1" value="0"><output id="alignYawValue">0°</output></label>
-      <button id="alignRight" class="nudge" title="顺时针 1°（Shift=5°）">↷</button>
+      <button id="mirrorY" class="active">Y镜像</button>
+      <button id="measureToggle">测距</button>
+      <button id="measureClear">清空测量</button>
+      <button id="togglePath" class="active">轨迹</button>
+      <button id="toggleFollow">跟随扫描</button>
+      <button id="axisX" class="nudge">X</button>
+      <button id="axisY" class="nudge active">Y</button>
+      <button id="axisZ" class="nudge">Z</button>
+      <button id="alignLeft" class="nudge" title="逆时针 1 度，Shift=5 度">↶</button>
+      <label class="align">旋转 <input id="alignYaw" type="range" min="-180" max="180" step="1" value="0"><output id="alignYawValue">Y 0°</output></label>
+      <label class="align">点大小 <input id="pointSize" type="range" min="0.3" max="5" step="0.1" value="1"><output id="pointSizeValue">1.0x</output></label>
+      <button id="alignRight" class="nudge" title="顺时针 1 度，Shift=5 度">↷</button>
       <button id="reset" class="primary">居中</button>
     </div>
   </header>
   <main>
     <aside id="mapList">加载中...</aside>
     <section class="stage">
-      <canvas id="canvas"></canvas>
+      <div id="viewer"></div>
       <div class="hud" id="hud">选择一个 PCD/PLY 文件</div>
+      <div class="pip" id="pipPanel">
+        <img id="pipImage" alt="扫描当时画面">
+        <div class="pip-meta" id="pipMeta">无图像帧</div>
+      </div>
+      <div class="replay-bar" id="replayBar">
+        <button id="replayPlay" class="primary">播放</button>
+        <button id="replayStop">复位</button>
+        <input id="replaySlider" type="range" min="0" max="1000" step="1" value="0">
+        <span class="time" id="replayTime">0.0 / 0.0 s</span>
+        <button id="replaySpeed" data-speed="1">1×</button>
+      </div>
+      <div class="legend">
+        <div><span style="background:#ef4444"></span>X / X0</div>
+        <div><span style="background:#22c55e"></span>Y / Y0</div>
+        <div><span style="background:#3b82f6"></span>Z / Z0</div>
+        <div><span style="background:#facc15"></span>扫描轨迹</div>
+      </div>
     </section>
   </main>
+
+  <script src="/vendor/three.min.js"></script>
   <script>
-    const canvas = document.getElementById("canvas");
-    const ctx = canvas.getContext("2d");
+    const viewer = document.getElementById("viewer");
     const hud = document.getElementById("hud");
-    const maxDrawPoints = 180000;
-    const alignStorageKey = "jrMapViewer.alignDeg";
+    const maxDrawPoints = 900000;
+    const alignLegacyStorageKey = "jrMapViewer.alignDeg";
+    const alignStorageKey = "jrMapViewer.alignDegs";
     const alignAxisKey = "jrMapViewer.alignAxis";
+    const pointSizeKey = "jrMapViewer.pointSize";
+    const mirrorYKey = "jrMapViewer.mirrorY";
+    const mirrorDefaultKey = "jrMapViewer.mirrorYDefaultV2";
     const keys = new Set();
 
-    let rawPoints = [];
-    let rawBounds = null;
+    let scene, camera, renderer, grid, cloudObject, originGroup, measureGroup;
+    let raycaster = null;
+    let pointerNdc = null;
+    let sourcePoints = [];
     let points = [];
+    let measurePoints = [];
     let bounds = null;
-    let alignAxis = localStorage.getItem(alignAxisKey) || "z";
-    let alignYawDeg = Number(localStorage.getItem(alignStorageKey) || 0);
+    let currentName = "map";
+    let currentTotal = 0;
+    let alignAxis = localStorage.getItem(alignAxisKey) || "y";
+    let alignDegs = loadAlignmentDegs();
+    let pointSize = Number(localStorage.getItem(pointSizeKey) || 1);
+    if (localStorage.getItem(mirrorDefaultKey) !== "done") {
+      localStorage.setItem(mirrorYKey, "off");
+      localStorage.setItem(mirrorDefaultKey, "done");
+    }
+    let mirrorY = localStorage.getItem(mirrorYKey) === "on";
     let view = "top";
-    let zoom = 60;
-    let panX = 0;
-    let panY = 0;
+    let cameraTarget = new THREE.Vector3(0, 0, 0);
+    let orbitYaw = -0.72;
+    let orbitPitch = 0.68;
+    let orbitDistance = 12;
+    let fpsPosition = new THREE.Vector3(0, 1.2, 0);
+    let fpsYaw = Math.PI;
+    let fpsPitch = 0;
     let dragging = false;
-    let last = [0, 0];
+    let lastPointer = null;
+    let pointerDown = null;
+    let measurementMode = false;
+    let measurementMessage = "";
     let lastFrame = performance.now();
-    let fps = 0;
-    let fpsFrames = 0;
-    let fpsTime = performance.now();
-    let roam = { pos: [0, 0, 0], yaw: 0, pitch: 0, speed: 1.8, sensitivity: 0.0025 };
+    let frameCount = 0;
+    let fpsStarted = performance.now();
+    let renderFps = 0;
+    let currentMapPath = "";
+    let cloudLoadGeneration = 0;
+    let defaultLoadPending = false;
+    let pathLine = null;
+    let poseMarker = null;
+    let showPath = true;
+    let followReplay = false;
+    let replay = null;
+    let replayPlaying = false;
+    let replaySpeed = 1;
+    let replayTime = 0;
+    let lastFrameImage = "";
 
+    function $(id) { return document.getElementById(id); }
+    function clampByte(v) { return Math.max(0, Math.min(255, Math.round(v))); }
     function fmtSize(n) {
       if (n > 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
       return `${Math.max(1, Math.round(n / 1024))} KB`;
     }
+    function formatCount(n) {
+      if (n >= 1000000) return `${(n / 1000000).toFixed(2)}M`;
+      if (n >= 10000) return `${(n / 10000).toFixed(1)}万`;
+      return String(n);
+    }
+
+    function loadAlignmentDegs() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(alignStorageKey) || "null");
+        if (parsed && Number.isFinite(parsed.x) && Number.isFinite(parsed.y) && Number.isFinite(parsed.z)) {
+          return { x: parsed.x, y: parsed.y, z: parsed.z };
+        }
+      } catch (_) {}
+      const legacyAxis = localStorage.getItem(alignAxisKey) || "y";
+      const legacyDeg = Number(localStorage.getItem(alignLegacyStorageKey) || 0);
+      return {
+        x: legacyAxis === "x" && Number.isFinite(legacyDeg) ? legacyDeg : 0,
+        y: legacyAxis === "y" && Number.isFinite(legacyDeg) ? legacyDeg : 0,
+        z: legacyAxis === "z" && Number.isFinite(legacyDeg) ? legacyDeg : 0,
+      };
+    }
+
+    function saveAlignmentDegs() {
+      localStorage.setItem(alignStorageKey, JSON.stringify(alignDegs));
+    }
+
+    function displayColor(r, g, b) {
+      const rr = Number.isFinite(r) ? r : 120;
+      const gg = Number.isFinite(g) ? g : 220;
+      const bb = Number.isFinite(b) ? b : 255;
+      const luma = 0.299 * rr + 0.587 * gg + 0.114 * bb;
+      const saturation = 2.2;
+      const gain = 1.35;
+      const lift = 6;
+      return [
+        clampByte((luma + (rr - luma) * saturation) * gain + lift),
+        clampByte((luma + (gg - luma) * saturation) * gain + lift),
+        clampByte((luma + (bb - luma) * saturation) * gain + lift),
+      ];
+    }
+
+    function rotateSource(x, y, z) {
+      const ay = alignDegs.y * Math.PI / 180;
+      const ax = alignDegs.x * Math.PI / 180;
+      const az = alignDegs.z * Math.PI / 180;
+      let c = Math.cos(ay), s = Math.sin(ay);
+      [x, z] = [x * c - z * s, x * s + z * c];
+      c = Math.cos(ax); s = Math.sin(ax);
+      [y, z] = [y * c - z * s, y * s + z * c];
+      c = Math.cos(az); s = Math.sin(az);
+      [x, y] = [x * c - y * s, x * s + y * c];
+      return [x, y, z];
+    }
+
+    function sourceToThree(row) {
+      let x = row[0];
+      let y = mirrorY ? -row[1] : row[1];
+      let z = row[2];
+      [x, y, z] = rotateSource(x, y, z);
+      return new THREE.Vector3(x, z, -y);
+    }
+
+    function poseToThree(p) {
+      return sourceToThree([p[0], p[1], p[2], 255, 255, 255]);
+    }
+
+    function quatToHeading(q) {
+      // yaw around Z in ROS (camera_init), then map into viewer.
+      const [qx, qy, qz, qw] = q;
+      const siny = 2 * (qw * qz + qx * qy);
+      const cosy = 1 - 2 * (qy * qy + qz * qz);
+      return Math.atan2(siny, cosy);
+    }
+
+    function headingDirectionThree(yawRos) {
+      // ROS forward +X after yaw around Z; viewer uses sourceToThree on unit vector.
+      const fx = Math.cos(yawRos);
+      const fy = Math.sin(yawRos);
+      const a = poseToThree([0, 0, 0]);
+      const b = poseToThree([fx, fy, 0]);
+      return b.sub(a).normalize();
+    }
+
+    function clearReplayVisuals() {
+      if (pathLine) {
+        scene.remove(pathLine);
+        pathLine.geometry?.dispose?.();
+        pathLine.material?.dispose?.();
+        pathLine = null;
+      }
+      if (poseMarker) {
+        scene.remove(poseMarker);
+        poseMarker = null;
+      }
+    }
+
+    function stopReplay(resetTime = false) {
+      replayPlaying = false;
+      if ($("replayPlay")) $("replayPlay").textContent = "播放";
+      if (resetTime) {
+        replayTime = 0;
+        if ($("replaySlider")) $("replaySlider").value = "0";
+        updateReplayPose();
+      }
+    }
+
+    function setReplayVisible(on) {
+      $("replayBar")?.classList.toggle("visible", Boolean(on));
+      $("pipPanel")?.classList.toggle("visible", Boolean(on && replay?.frames?.length));
+      if (!on) {
+        stopReplay(true);
+        clearReplayVisuals();
+        lastFrameImage = "";
+        if ($("pipImage")) $("pipImage").removeAttribute("src");
+        if ($("pipMeta")) $("pipMeta").textContent = "无图像帧";
+      }
+    }
+
+    function rebuildPathVisual() {
+      clearReplayVisuals();
+      if (!replay || !showPath || !replay.path?.length) return;
+      const pts = replay.path.map((s) => poseToThree(s.p));
+      const geometry = new THREE.BufferGeometry().setFromPoints(pts);
+      pathLine = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: 0xfacc15 }));
+      scene.add(pathLine);
+      const span = bounds ? Math.max(bounds.span.x, bounds.span.y, bounds.span.z) : 4;
+      const len = Math.max(0.5, Math.min(2.4, span * 0.08));
+      poseMarker = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(), len, 0x38bdf8, len * 0.28, len * 0.16);
+      scene.add(poseMarker);
+      updateReplayPose();
+    }
+
+    function samplePathAt(tAbs) {
+      const path = replay?.path || [];
+      if (!path.length) return null;
+      if (tAbs <= path[0].t) return path[0];
+      if (tAbs >= path[path.length - 1].t) return path[path.length - 1];
+      let lo = 0;
+      let hi = path.length - 1;
+      while (lo + 1 < hi) {
+        const mid = (lo + hi) >> 1;
+        if (path[mid].t <= tAbs) lo = mid;
+        else hi = mid;
+      }
+      const a = path[lo];
+      const b = path[hi];
+      const u = (tAbs - a.t) / Math.max(1e-6, b.t - a.t);
+      return {
+        t: tAbs,
+        p: [
+          a.p[0] + (b.p[0] - a.p[0]) * u,
+          a.p[1] + (b.p[1] - a.p[1]) * u,
+          a.p[2] + (b.p[2] - a.p[2]) * u,
+        ],
+        q: u < 0.5 ? a.q : b.q,
+      };
+    }
+
+    function sampleFrameAt(tAbs) {
+      const frames = replay?.frames || [];
+      if (!frames.length) return null;
+      let best = frames[0];
+      for (const f of frames) {
+        if (f.t <= tAbs) best = f;
+        else break;
+      }
+      return best;
+    }
+
+    function updateReplayPose() {
+      if (!replay) return;
+      const tAbs = (replay.t0 || 0) + replayTime;
+      const sample = samplePathAt(tAbs);
+      if (sample && poseMarker) {
+        const pos = poseToThree(sample.p);
+        const yaw = quatToHeading(sample.q || [0, 0, 0, 1]);
+        const dir = headingDirectionThree(yaw);
+        poseMarker.position.copy(pos);
+        poseMarker.setDirection(dir.lengthSq() > 1e-6 ? dir : new THREE.Vector3(1, 0, 0));
+        poseMarker.visible = showPath;
+        if (followReplay) {
+          const back = dir.clone().multiplyScalar(-Math.max(1.2, orbitDistance * 0.12));
+          fpsPosition.copy(pos).add(back).add(new THREE.Vector3(0, Math.max(0.6, orbitDistance * 0.04), 0));
+          fpsYaw = Math.atan2(dir.x, dir.z);
+          fpsPitch = -0.12;
+          cameraTarget.copy(pos);
+          if (view !== "roam" && view !== "free") setView("free");
+        }
+      }
+      const frame = sampleFrameAt(tAbs);
+      if (frame?.image && currentMapPath) {
+        const url = `/files/${encodeURIComponent(`${currentMapPath}/replay/${frame.image}`).replaceAll("%2F", "/")}`;
+        if (url !== lastFrameImage) {
+          lastFrameImage = url;
+          if ($("pipImage")) $("pipImage").src = url;
+        }
+        if ($("pipMeta")) $("pipMeta").textContent = `t=${(frame.t - (replay.t0 || 0)).toFixed(2)}s · ${frame.image}`;
+        $("pipPanel")?.classList.add("visible");
+      } else if ($("pipMeta")) {
+        $("pipMeta").textContent = "无图像帧";
+      }
+      const dur = Math.max(0, Number(replay.duration) || Math.max(0, (replay.t1 || 0) - (replay.t0 || 0)));
+      if ($("replayTime")) $("replayTime").textContent = `${replayTime.toFixed(1)} / ${dur.toFixed(1)} s`;
+      if ($("replaySlider") && !Number.isNaN(dur) && dur > 0) {
+        $("replaySlider").value = String(Math.round((replayTime / dur) * 1000));
+      }
+    }
+
+    async function loadReplayForMap(mapPath, replayMeta, loadGeneration = cloudLoadGeneration) {
+      if (loadGeneration !== cloudLoadGeneration) return;
+      currentMapPath = mapPath || "";
+      replay = null;
+      stopReplay(true);
+      setReplayVisible(false);
+      if (!mapPath || !replayMeta?.ok || !replayMeta?.trajectory) return;
+      try {
+        const url = `/files/${encodeURIComponent(replayMeta.trajectory).replaceAll("%2F", "/")}`;
+        const res = await fetch(url, { cache: "no-store" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const loadedReplay = await res.json();
+        if (loadGeneration !== cloudLoadGeneration) return;
+        if (!loadedReplay?.path?.length) throw new Error("trajectory empty");
+        replay = loadedReplay;
+        replayTime = 0;
+        setReplayVisible(true);
+        rebuildPathVisual();
+        updateReplayPose();
+      } catch (err) {
+        if (loadGeneration !== cloudLoadGeneration) return;
+        replay = null;
+        setReplayVisible(false);
+        console.warn("replay load failed", err);
+      }
+    }
+
+    function initThree() {
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x111820);
+      camera = new THREE.PerspectiveCamera(68, 1, 0.03, 3000);
+      renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      viewer.appendChild(renderer.domElement);
+      scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+      grid = new THREE.GridHelper(80, 80, 0x35505c, 0x21313a);
+      scene.add(grid);
+      originGroup = new THREE.Group();
+      scene.add(originGroup);
+      measureGroup = new THREE.Group();
+      scene.add(measureGroup);
+      raycaster = new THREE.Raycaster();
+      pointerNdc = new THREE.Vector2();
+      resize();
+      requestAnimationFrame(renderLoop);
+    }
+
+    function resize() {
+      if (!renderer || !camera) return;
+      const rect = viewer.getBoundingClientRect();
+      renderer.setSize(Math.max(1, Math.floor(rect.width)), Math.max(1, Math.floor(rect.height)), false);
+      camera.aspect = Math.max(1, rect.width) / Math.max(1, rect.height);
+      camera.updateProjectionMatrix();
+    }
+
+    function updateCameraPose() {
+      if (!camera) return;
+      if (view === "roam") {
+        const direction = new THREE.Vector3(
+          Math.sin(fpsYaw) * Math.cos(fpsPitch),
+          Math.sin(fpsPitch),
+          Math.cos(fpsYaw) * Math.cos(fpsPitch)
+        ).normalize();
+        camera.position.copy(fpsPosition);
+        camera.up.set(0, 1, 0);
+        camera.lookAt(fpsPosition.clone().add(direction));
+        return;
+      }
+      if (view === "top") {
+        camera.position.set(cameraTarget.x, cameraTarget.y + orbitDistance, cameraTarget.z + 0.01);
+        camera.up.set(0, 0, -1);
+      } else if (view === "front") {
+        camera.position.set(cameraTarget.x, cameraTarget.y + orbitDistance * 0.18, cameraTarget.z + orbitDistance);
+        camera.up.set(0, 1, 0);
+      } else {
+        const cp = Math.cos(orbitPitch);
+        camera.position.set(
+          cameraTarget.x + Math.sin(orbitYaw) * cp * orbitDistance,
+          cameraTarget.y + Math.sin(orbitPitch) * orbitDistance,
+          cameraTarget.z + Math.cos(orbitYaw) * cp * orbitDistance
+        );
+        camera.up.set(0, 1, 0);
+      }
+      camera.lookAt(cameraTarget);
+    }
+
+    function renderLoop(now) {
+      const dt = Math.min(0.05, Math.max(0.001, (now - lastFrame) / 1000));
+      lastFrame = now;
+      frameCount++;
+      if (now - fpsStarted >= 1000) {
+        renderFps = frameCount;
+        frameCount = 0;
+        fpsStarted = now;
+        updateHud();
+      }
+      if (replayPlaying && replay) {
+        const dur = Math.max(0, Number(replay.duration) || Math.max(0, (replay.t1 || 0) - (replay.t0 || 0)));
+        replayTime = Math.min(dur, replayTime + dt * replaySpeed);
+        updateReplayPose();
+        if (replayTime >= dur - 1e-4) stopReplay(false);
+      }
+      updateRoam(dt);
+      updateCameraPose();
+      renderer.render(scene, camera);
+      requestAnimationFrame(renderLoop);
+    }
+
+    async function buildReplayForMap(scanId, button) {
+      if (!scanId) return;
+      if (button) {
+        button.disabled = true;
+        button.classList.add("busy");
+        button.textContent = "生成中…";
+      }
+      hud.textContent = `正在生成回放：${scanId}…`;
+      try {
+        const res = await fetch("/api/replay/build", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scan_id: scanId }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || data.output || data.stderr || `HTTP ${res.status}`);
+        }
+        hud.textContent = `回放已生成：${scanId}（轨迹 ${data.replay?.path_count ?? "-"} · 图像 ${data.replay?.frame_count ?? "-"}）`;
+        await loadMaps();
+      } catch (err) {
+        hud.textContent = `生成回放失败: ${err.message}`;
+        if (button) {
+          button.disabled = false;
+          button.classList.remove("busy");
+          button.textContent = "生成回放";
+        }
+      }
+    }
 
     async function loadMaps() {
-      const res = await fetch("/api/maps");
+      const res = await fetch("/api/maps", { cache: "no-store" });
       const data = await res.json();
-      const root = document.getElementById("mapList");
+      const root = $("mapList");
       root.innerHTML = data.maps.length ? "" : "暂无地图";
+      let shouldLoadDefault = !sourcePoints.length && cloudLoadGeneration === 0 && !defaultLoadPending;
       for (const map of data.maps) {
         const div = document.createElement("div");
         div.className = "map";
-        div.innerHTML = `<strong>${map.name}</strong><div class="files"></div>`;
+        const badge = map.has_replay ? `<span class="replay-badge">可回放</span>` : "";
+        const replayHint = map.has_replay
+          ? `<div style="margin:0 0 8px;color:#5b6b78;font-size:12px;font-weight:650">轨迹 ${map.replay?.path_count ?? "-"} · 图像 ${map.replay?.frame_count ?? "-"} · ${Number(map.replay?.duration || 0).toFixed(1)}s</div>`
+          : `<div style="margin:0 0 8px;color:#5b6b78;font-size:12px;font-weight:650">尚未生成回放包</div>`;
+        div.innerHTML = `<strong>${map.name}${badge}</strong>${replayHint}<div class="map-actions"></div><div class="files"></div>`;
+        const actions = div.querySelector(".map-actions");
+        if (!map.has_replay) {
+          const gen = document.createElement("button");
+          gen.className = "primary";
+          gen.textContent = "生成回放";
+          gen.onclick = (event) => {
+            event.stopPropagation();
+            buildReplayForMap(map.name, gen);
+          };
+          actions.appendChild(gen);
+        }
         const files = div.querySelector(".files");
         const sorted = [...map.files].sort((a, b) => {
-          const score = (f) => f.name.includes("downsampled") ? 0 : 1;
+          const score = (f) => f.name.includes("raw") ? 0 : f.name.includes("downsampled") ? 1 : f.name.endsWith(".ply") ? 2 : 3;
           return score(a) - score(b);
         });
         for (const f of sorted) {
           const btn = document.createElement("button");
           btn.textContent = `${f.name} · ${fmtSize(f.size)}`;
-          btn.onclick = () => loadCloud(`/files/${encodeURIComponent(f.path).replaceAll("%2F", "/")}`, f.name);
+          btn.onclick = () => loadCloud(
+            `/files/${encodeURIComponent(f.path).replaceAll("%2F", "/")}`,
+            f.name,
+            map.path,
+            map.replay
+          );
           files.appendChild(btn);
         }
         root.appendChild(div);
-        const first = sorted.find(f => f.name.includes("downsampled")) || sorted[0];
-        if (!points.length && first) {
-          setTimeout(() => loadCloud(`/files/${encodeURIComponent(first.path).replaceAll("%2F", "/")}`, first.name), 100);
+        const first = sorted.find(f => f.name.includes("raw") && f.name.endsWith(".pcd"))
+          || sorted.find(f => f.name.includes("downsampled"))
+          || sorted[0];
+        if (shouldLoadDefault && first) {
+          shouldLoadDefault = false;
+          defaultLoadPending = true;
+          setTimeout(() => {
+            defaultLoadPending = false;
+            if (sourcePoints.length || cloudLoadGeneration !== 0) return;
+            loadCloud(
+              `/files/${encodeURIComponent(first.path).replaceAll("%2F", "/")}`,
+              first.name,
+              map.path,
+              map.replay
+            );
+          }, 100);
         }
       }
     }
 
     function asciiHeader(buffer) {
       const bytes = new Uint8Array(buffer);
-      const needle = [68, 65, 84, 65, 32]; // "DATA "
-      for (let i = 0; i < Math.min(bytes.length - 12, 8192); i++) {
+      const needle = [68, 65, 84, 65, 32];
+      for (let i = 0; i < Math.min(bytes.length - 12, 16384); i++) {
         let ok = true;
         for (let j = 0; j < needle.length; j++) if (bytes[i + j] !== needle[j]) ok = false;
         if (ok) {
@@ -132,325 +605,594 @@
       throw new Error("PCD header DATA line not found");
     }
 
+    function headerValue(text, key, fallback = "") {
+      return (text.match(new RegExp(`^${key}\\s+(.+)$`, "mi")) || [, fallback])[1].trim();
+    }
+
     function parsePcd(buffer) {
       const { text, dataOffset } = asciiHeader(buffer);
-      const pointsTotal = Number((text.match(/POINTS\s+(\d+)/) || [])[1] || 0);
-      const fields = (text.match(/FIELDS\s+(.+)/) || [,""])[1].trim().split(/\s+/);
-      const hasRgb = fields.includes("rgb") || fields.includes("rgba");
-      if (!pointsTotal) throw new Error("PCD POINTS is 0 or missing");
-      const stride = fields.length * 4;
-      const step = Math.max(1, Math.ceil(pointsTotal / maxDrawPoints));
+      const total = Number(headerValue(text, "POINTS", "0"));
+      const fields = headerValue(text, "FIELDS").split(/\s+/);
+      const sizes = headerValue(text, "SIZE", fields.map(() => 4).join(" ")).split(/\s+/).map(Number);
+      const types = headerValue(text, "TYPE", fields.map(() => "F").join(" ")).split(/\s+/);
+      const counts = headerValue(text, "COUNT", fields.map(() => 1).join(" ")).split(/\s+/).map(Number);
+      const dataType = headerValue(text, "DATA", "binary").toLowerCase();
+      const offsets = [];
+      let stride = 0;
+      for (let i = 0; i < fields.length; i++) {
+        offsets.push(stride);
+        stride += (sizes[i] || 4) * (counts[i] || 1);
+      }
+      const xIdx = fields.indexOf("x");
+      const yIdx = fields.indexOf("y");
+      const zIdx = fields.indexOf("z");
+      const rgbIdx = fields.includes("rgb") ? fields.indexOf("rgb") : fields.indexOf("rgba");
+      if (xIdx < 0 || yIdx < 0 || zIdx < 0 || !total) throw new Error("PCD xyz fields missing");
+      const step = Math.max(1, Math.ceil(total / maxDrawPoints));
+      if (dataType.includes("ascii")) {
+        const textBody = new TextDecoder("utf-8").decode(new Uint8Array(buffer, dataOffset));
+        const lines = textBody.split(/\r?\n/);
+        const out = [];
+        for (let i = 0; i < total; i += step) {
+          const values = lines[i]?.trim().split(/\s+/).map(Number);
+          if (!values || values.length < 3) continue;
+          let rgb = [120, 220, 255];
+          if (rgbIdx >= 0) rgb = unpackRgb(values[rgbIdx]);
+          out.push([values[xIdx], values[yIdx], values[zIdx], rgb[0], rgb[1], rgb[2]]);
+        }
+        return { points: out.filter(p => Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[2])), total, hasRgb: rgbIdx >= 0 };
+      }
       const view = new DataView(buffer, dataOffset);
       const out = [];
-      for (let i = 0; i < pointsTotal; i += step) {
-        const off = i * stride;
-        if (off + 12 > view.byteLength) break;
-        const x = view.getFloat32(off, true);
-        const y = view.getFloat32(off + 4, true);
-        const z = view.getFloat32(off + 8, true);
-        let r = 120, g = 220, b = 255;
-        if (hasRgb && off + 16 <= view.byteLength) {
-          const rgb = view.getUint32(off + 12, true);
-          r = (rgb >> 16) & 255;
-          g = (rgb >> 8) & 255;
-          b = rgb & 255;
-        }
-        if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) out.push([x, y, z, r, g, b]);
+      for (let i = 0; i < total; i += step) {
+        const base = i * stride;
+        if (base + stride > view.byteLength) break;
+        const x = readField(view, base + offsets[xIdx], sizes[xIdx], types[xIdx]);
+        const y = readField(view, base + offsets[yIdx], sizes[yIdx], types[yIdx]);
+        const z = readField(view, base + offsets[zIdx], sizes[zIdx], types[zIdx]);
+        let rgb = [120, 220, 255];
+        if (rgbIdx >= 0) rgb = readRgbField(view, base + offsets[rgbIdx], sizes[rgbIdx], types[rgbIdx]);
+        if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) out.push([x, y, z, rgb[0], rgb[1], rgb[2]]);
       }
-      return { points: out, total: pointsTotal };
+      return { points: out, total, hasRgb: rgbIdx >= 0 };
     }
 
-    function parsePly(text) {
-      const lines = text.split(/\r?\n/);
-      const end = lines.findIndex(l => l.trim() === "end_header");
-      const countLine = lines.find(l => l.startsWith("element vertex"));
-      const total = Number(countLine?.split(/\s+/)[2] || 0);
+    function readField(view, offset, size = 4, type = "F") {
+      if (type === "F") return size === 8 ? view.getFloat64(offset, true) : view.getFloat32(offset, true);
+      if (type === "U") {
+        if (size === 1) return view.getUint8(offset);
+        if (size === 2) return view.getUint16(offset, true);
+        return view.getUint32(offset, true);
+      }
+      if (size === 1) return view.getInt8(offset);
+      if (size === 2) return view.getInt16(offset, true);
+      return view.getInt32(offset, true);
+    }
+
+    function readRgbField(view, offset, size = 4, type = "F") {
+      const packed = type === "F" ? view.getUint32(offset, true) : (size === 1 ? view.getUint8(offset) : size === 2 ? view.getUint16(offset, true) : view.getUint32(offset, true));
+      return [(packed >> 16) & 255, (packed >> 8) & 255, packed & 255];
+    }
+
+    function unpackRgb(value) {
+      if (!Number.isFinite(value)) return [120, 220, 255];
+      const buffer = new ArrayBuffer(4);
+      const view = new DataView(buffer);
+      if (Math.abs(value) < 1e-30) view.setFloat32(0, value, true);
+      else view.setUint32(0, value >>> 0, true);
+      const packed = view.getUint32(0, true);
+      return [(packed >> 16) & 255, (packed >> 8) & 255, packed & 255];
+    }
+
+    function parsePly(buffer) {
+      const bytes = new Uint8Array(buffer);
+      let headerEnd = 0;
+      for (let i = 0; i < Math.min(bytes.length, 8192); i++) {
+        if (bytes[i] === 101 && bytes[i + 1] === 110 && bytes[i + 2] === 100 && bytes[i + 3] === 95) {
+          while (i < bytes.length && bytes[i] !== 10) i++;
+          headerEnd = i + 1;
+          break;
+        }
+      }
+      const headerText = new TextDecoder().decode(bytes.slice(0, headerEnd));
+      const lines = headerText.split(/\r?\n/);
+      const isBinary = (lines.find(l => l.startsWith("format")) || "").includes("binary_little_endian");
+      const total = Number((lines.find(l => l.startsWith("element vertex")) || "").split(/\s+/)[2] || 0);
+      const props = [];
+      let inVertex = false;
+      for (const line of lines) {
+        if (line.startsWith("element vertex")) { inVertex = true; continue; }
+        if (line.startsWith("element") && inVertex) break;
+        if (inVertex && line.startsWith("property")) {
+          const parts = line.split(/\s+/);
+          props.push({ type: parts[1], name: parts[2] });
+        }
+      }
       const step = Math.max(1, Math.ceil(total / maxDrawPoints));
+      if (!isBinary) {
+        const text = new TextDecoder().decode(bytes);
+        const allLines = text.split(/\r?\n/);
+        const endIdx = allLines.findIndex(l => l.trim() === "end_header");
+        const out = [];
+        for (let i = 0; i < total; i += step) {
+          const v = allLines[endIdx + 1 + i]?.trim().split(/\s+/).map(Number);
+          if (!v || v.length < 3) continue;
+          out.push([v[0], v[1], v[2], v[3] ?? 120, v[4] ?? 220, v[5] ?? 255]);
+        }
+        return { points: out, total, hasRgb: props.some(p => p.name === "red") };
+      }
+      const propSize = t => ({ float: 4, double: 8, uchar: 1, char: 1, short: 2, ushort: 2, int: 4, uint: 4 }[t] || 4);
+      const stride = props.reduce((sum, p) => sum + propSize(p.type), 0);
+      const offsets = [];
+      let offset = 0;
+      for (const prop of props) { offsets.push(offset); offset += propSize(prop.type); }
+      const xIdx = props.findIndex(p => p.name === "x");
+      const yIdx = props.findIndex(p => p.name === "y");
+      const zIdx = props.findIndex(p => p.name === "z");
+      const rIdx = props.findIndex(p => p.name === "red");
+      const gIdx = props.findIndex(p => p.name === "green");
+      const bIdx = props.findIndex(p => p.name === "blue");
+      const data = new DataView(buffer, headerEnd);
       const out = [];
       for (let i = 0; i < total; i += step) {
-        const v = lines[end + 1 + i]?.trim().split(/\s+/).map(Number);
-        if (!v || v.length < 3) continue;
-        out.push([v[0], v[1], v[2], v[3] ?? 120, v[4] ?? 220, v[5] ?? 255]);
+        const base = i * stride;
+        if (base + stride > data.byteLength) break;
+        const x = data.getFloat32(base + offsets[xIdx], true);
+        const y = data.getFloat32(base + offsets[yIdx], true);
+        const z = data.getFloat32(base + offsets[zIdx], true);
+        const r = rIdx >= 0 ? data.getUint8(base + offsets[rIdx]) : 120;
+        const g = gIdx >= 0 ? data.getUint8(base + offsets[gIdx]) : 220;
+        const b = bIdx >= 0 ? data.getUint8(base + offsets[bIdx]) : 255;
+        if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) out.push([x, y, z, r, g, b]);
       }
-      return { points: out, total };
+      return { points: out, total, hasRgb: rIdx >= 0 && gIdx >= 0 && bIdx >= 0 };
     }
 
-    async function loadCloud(url, name) {
+    async function loadCloud(url, name, mapPath = "", replayMeta = null) {
+      const loadGeneration = ++cloudLoadGeneration;
+      defaultLoadPending = false;
       try {
         hud.textContent = `加载 ${name}...`;
+        clearMeasurement();
+        stopReplay(true);
+        setReplayVisible(false);
         const res = await fetch(url, { cache: "no-store" });
-        const parsed = name.endsWith(".pcd") ? parsePcd(await res.arrayBuffer()) : parsePly(await res.text());
-        rawPoints = parsed.points;
-        rawBounds = computeBounds(rawPoints);
-        applyAlignment(false);
-        resetView(false);
-        hud.textContent = statusText(name, parsed.total);
-        draw();
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const buffer = await res.arrayBuffer();
+        if (loadGeneration !== cloudLoadGeneration) return;
+        const parsed = name.toLowerCase().endsWith(".pcd") ? parsePcd(buffer) : parsePly(buffer);
+        if (loadGeneration !== cloudLoadGeneration) return;
+        sourcePoints = parsed.points;
+        currentName = name;
+        currentTotal = parsed.total;
+        rebuildCloud();
+        resetView();
+        await loadReplayForMap(mapPath, replayMeta, loadGeneration);
       } catch (err) {
-        hud.textContent = `加载失败：${err.message}`;
+        if (loadGeneration !== cloudLoadGeneration) return;
+        hud.textContent = `加载失败: ${err.message}`;
       }
     }
 
-    function computeBounds(ps) {
-      const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
-      for (const p of ps) for (let i = 0; i < 3; i++) { min[i] = Math.min(min[i], p[i]); max[i] = Math.max(max[i], p[i]); }
-      return { min, max, center: min.map((v, i) => (v + max[i]) / 2), span: max.map((v, i) => v - min[i]) };
+    function computeBoundsFromVectors(vectors) {
+      const min = new THREE.Vector3(Infinity, Infinity, Infinity);
+      const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+      for (const v of vectors) { min.min(v); max.max(v); }
+      const center = min.clone().add(max).multiplyScalar(0.5);
+      const span = max.clone().sub(min);
+      return { min, max, center, span };
     }
 
-    function applyAlignment(redraw = true) {
-      if (!rawPoints.length || !rawBounds) {
-        points = [];
+    function rebuildCloud() {
+      if (cloudObject) {
+        scene.remove(cloudObject);
+        cloudObject.geometry.dispose();
+        cloudObject.material.dispose();
+        cloudObject = null;
+      }
+      points = [];
+      if (!sourcePoints.length) {
         bounds = null;
+        clearMeasurement();
+        updateOriginAxes();
+        updateHud();
         return;
       }
-      const angle = alignYawDeg * Math.PI / 180;
-      const ca = Math.cos(angle);
-      const sa = Math.sin(angle);
-      const c = rawBounds.center;
-      points = rawPoints.map(p => {
-        const dx = p[0] - c[0];
-        const dy = p[1] - c[1];
-        const dz = p[2] - c[2];
-        if (alignAxis === "z") {
-          return [c[0] + dx * ca - dy * sa, c[1] + dx * sa + dy * ca, p[2], p[3], p[4], p[5]];
-        } else if (alignAxis === "x") {
-          return [p[0], c[1] + dy * ca - dz * sa, c[2] + dy * sa + dz * ca, p[3], p[4], p[5]];
-        } else {
-          return [c[0] + dx * ca - dz * sa, p[1], c[2] + dx * sa + dz * ca, p[3], p[4], p[5]];
-        }
+      const positions = new Float32Array(sourcePoints.length * 3);
+      const colors = new Float32Array(sourcePoints.length * 3);
+      for (let i = 0; i < sourcePoints.length; i++) {
+        const p = sourcePoints[i];
+        const v = sourceToThree(p);
+        points.push(v);
+        positions[i * 3] = v.x;
+        positions[i * 3 + 1] = v.y;
+        positions[i * 3 + 2] = v.z;
+        const c = displayColor(p[3], p[4], p[5]);
+        colors[i * 3] = c[0] / 255;
+        colors[i * 3 + 1] = c[1] / 255;
+        colors[i * 3 + 2] = c[2] / 255;
+      }
+      bounds = computeBoundsFromVectors(points);
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+      const material = new THREE.PointsMaterial({
+        size: pointRenderSize(),
+        vertexColors: true,
+        sizeAttenuation: true,
       });
-      bounds = computeBounds(points);
-      if (redraw) resetView(true);
+      cloudObject = new THREE.Points(geometry, material);
+      scene.add(cloudObject);
+      updateOriginAxes();
+      rebuildPathVisual();
+      updateHud();
+    }
+
+    function pointRenderSize() {
+      return 0.035 * Math.max(0.3, Math.min(5, pointSize));
+    }
+
+    function updateOriginAxes() {
+      originGroup.clear();
+      if (!scene) return;
+      const span = bounds ? Math.max(bounds.span.x, bounds.span.y, bounds.span.z) : 2;
+      const len = Math.max(0.6, Math.min(3.5, span * 0.12));
+      const axes = [
+        { label: "X0", color: 0xef4444, end: [len, 0, 0] },
+        { label: "Y0", color: 0x22c55e, end: [0, len, 0] },
+        { label: "Z0", color: 0x3b82f6, end: [0, 0, len] },
+      ];
+      const origin = sourceToThree([0, 0, 0, 255, 255, 255]);
+      const sphere = new THREE.Mesh(
+        new THREE.SphereGeometry(Math.max(0.04, len * 0.035), 12, 8),
+        new THREE.MeshBasicMaterial({ color: 0xffffff })
+      );
+      sphere.position.copy(origin);
+      originGroup.add(sphere);
+      originGroup.add(makeLabel("O", origin.clone().add(new THREE.Vector3(0, len * 0.08, 0)), "#ffffff"));
+      for (const axis of axes) {
+        const end = sourceToThree([axis.end[0], axis.end[1], axis.end[2], 255, 255, 255]);
+        const geometry = new THREE.BufferGeometry().setFromPoints([origin, end]);
+        originGroup.add(new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: axis.color })));
+        originGroup.add(new THREE.ArrowHelper(end.clone().sub(origin).normalize(), origin, origin.distanceTo(end), axis.color, len * 0.16, len * 0.07));
+        originGroup.add(makeLabel(axis.label, end, `#${axis.color.toString(16).padStart(6, "0")}`));
+      }
+    }
+
+    function makeLabel(text, position, color) {
+      const canvas = document.createElement("canvas");
+      canvas.width = 96;
+      canvas.height = 40;
+      const ctx = canvas.getContext("2d");
+      ctx.font = "700 22px sans-serif";
+      ctx.fillStyle = color;
+      ctx.strokeStyle = "rgba(15,22,29,.9)";
+      ctx.lineWidth = 5;
+      ctx.strokeText(text, 8, 28);
+      ctx.fillText(text, 8, 28);
+      const texture = new THREE.CanvasTexture(canvas);
+      const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
+      const sprite = new THREE.Sprite(material);
+      sprite.position.copy(position);
+      sprite.scale.set(0.8, 0.34, 1);
+      return sprite;
+    }
+
+    function markerRadius() {
+      if (!bounds) return 0.08;
+      const span = Math.max(bounds.span.x, bounds.span.y, bounds.span.z);
+      return Math.max(0.045, Math.min(0.28, span * 0.012));
+    }
+
+    function formatVec(v) {
+      return `(${v.x.toFixed(3)}, ${v.y.toFixed(3)}, ${v.z.toFixed(3)})`;
+    }
+
+    function measurementText() {
+      if (!measurementMode && !measurePoints.length && !measurementMessage) return "";
+      const prefix = measurementMode ? "测距: 点击点云选择 A/B 两点" : "测距: 已关闭";
+      if (measurementMessage && !measurePoints.length) return `${prefix}\n${measurementMessage}`;
+      if (measurePoints.length === 1) return `${prefix}\nA ${formatVec(measurePoints[0])}，继续点击选择 B`;
+      if (measurePoints.length >= 2) {
+        const a = measurePoints[0];
+        const b = measurePoints[1];
+        const delta = b.clone().sub(a);
+        const distance = a.distanceTo(b);
+        return [
+          prefix,
+          `距离 ${distance.toFixed(3)} m / ${(distance * 1000).toFixed(0)} mm`,
+          `ΔX ${delta.x.toFixed(3)} m · ΔY ${delta.y.toFixed(3)} m · ΔZ ${delta.z.toFixed(3)} m`,
+          `A ${formatVec(a)}`,
+          `B ${formatVec(b)}`,
+        ].join("\n");
+      }
+      return prefix;
+    }
+
+    function clearMeasurement(message = "") {
+      measurePoints = [];
+      measurementMessage = message;
+      if (measureGroup) {
+        for (const child of [...measureGroup.children]) {
+          measureGroup.remove(child);
+          child.geometry?.dispose?.();
+          child.material?.dispose?.();
+          child.material?.map?.dispose?.();
+        }
+      }
+      updateHud();
+    }
+
+    function setMeasurementMode(enabled) {
+      measurementMode = Boolean(enabled);
+      $("measureToggle").classList.toggle("active", measurementMode);
+      measurementMessage = measurementMode ? "点击点云选择第一个点" : "";
+      updateHud();
+    }
+
+    function addMeasureMarker(point, label, color) {
+      const radius = markerRadius();
+      const sphere = new THREE.Mesh(
+        new THREE.SphereGeometry(radius, 18, 12),
+        new THREE.MeshBasicMaterial({ color, depthTest: false })
+      );
+      sphere.position.copy(point);
+      measureGroup.add(sphere);
+      measureGroup.add(makeLabel(label, point.clone().add(new THREE.Vector3(0, radius * 2.8, 0)), `#${color.toString(16).padStart(6, "0")}`));
+    }
+
+    function redrawMeasurement() {
+      if (!measureGroup) return;
+      for (const child of [...measureGroup.children]) {
+        measureGroup.remove(child);
+        child.geometry?.dispose?.();
+        child.material?.dispose?.();
+        child.material?.map?.dispose?.();
+      }
+      if (measurePoints[0]) addMeasureMarker(measurePoints[0], "A", 0x22c55e);
+      if (measurePoints[1]) {
+        addMeasureMarker(measurePoints[1], "B", 0xef4444);
+        const geometry = new THREE.BufferGeometry().setFromPoints([measurePoints[0], measurePoints[1]]);
+        const material = new THREE.LineBasicMaterial({ color: 0xfacc15, depthTest: false });
+        const line = new THREE.Line(geometry, material);
+        line.renderOrder = 10;
+        measureGroup.add(line);
+      }
+      updateHud();
+    }
+
+    function pickPoint(event) {
+      if (!measurementMode || !cloudObject || !raycaster || !pointerNdc) return false;
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointerNdc.x = ((event.clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1;
+      pointerNdc.y = -(((event.clientY - rect.top) / Math.max(1, rect.height)) * 2 - 1);
+      const distanceScale = Math.max(1, camera.position.distanceTo(cameraTarget));
+      raycaster.params.Points.threshold = Math.max(pointRenderSize() * 2.5, distanceScale * 0.004);
+      raycaster.setFromCamera(pointerNdc, camera);
+      const hit = raycaster.intersectObject(cloudObject, false)[0];
+      if (!hit) {
+        measurementMessage = "未选中点，请放大、靠近模型或调大点大小";
+        updateHud();
+        return true;
+      }
+      if (measurePoints.length >= 2) clearMeasurement();
+      measurePoints.push(hit.point.clone());
+      measurementMessage = "";
+      redrawMeasurement();
+      return true;
+    }
+
+    function resetView() {
+      if (!bounds) return;
+      cameraTarget.copy(bounds.center);
+      const span = Math.max(bounds.span.x, bounds.span.y, bounds.span.z);
+      orbitDistance = Math.max(4, Math.min(180, span * 0.72));
+      fpsPosition.copy(bounds.center).add(new THREE.Vector3(0, Math.max(1.2, span * 0.04), Math.max(1.5, span * 0.18)));
+      fpsYaw = Math.PI;
+      fpsPitch = 0;
+      updateHud();
+    }
+
+    function updateHud() {
+      const modeText = view === "roam" ? "漫游" : view === "top" ? "俯视" : view === "front" ? "前视" : "自由查看";
+      const pointText = `${formatCount(points.length)} / ${formatCount(currentTotal || points.length)}`;
+      const replayText = replay
+        ? ` · 轨迹 ${replay.path?.length || 0} · 图像 ${replay.frames?.length || 0} · ${replayPlaying ? "播放中" : "回放就绪"}`
+        : "";
+      const baseText = `${currentName} · ${pointText} points · ${modeText} · ${mirrorY ? "Y镜像" : "原始Y"} · X ${alignDegs.x}° Y ${alignDegs.y}° Z ${alignDegs.z}° · ${renderFps} fps${replayText}`;
+      const measureText = measurementText();
+      hud.textContent = measureText ? `${baseText}\n${measureText}` : baseText;
+    }
+
+    function updateAlignmentUi() {
+      for (const axis of ["x", "y", "z"]) {
+        const el = $("axis" + axis.toUpperCase());
+        el.classList.toggle("active", axis === alignAxis);
+        el.textContent = `${axis.toUpperCase()} ${alignDegs[axis]}°`;
+      }
+      $("alignYaw").value = String(alignDegs[alignAxis]);
+      $("alignYawValue").textContent = `${alignAxis.toUpperCase()} ${alignDegs[alignAxis]}°`;
     }
 
     function setAlignment(deg) {
-      alignYawDeg = Math.max(-180, Math.min(180, Math.round(deg)));
-      localStorage.setItem(alignStorageKey, String(alignYawDeg));
-      document.getElementById("alignYaw").value = String(alignYawDeg);
-      document.getElementById("alignYawValue").textContent = `${alignYawDeg}°`;
-      applyAlignment(true);
+      alignDegs[alignAxis] = Math.max(-180, Math.min(180, Math.round(deg)));
+      saveAlignmentDegs();
+      updateAlignmentUi();
+      clearMeasurement();
+      rebuildCloud();
+      rebuildPathVisual();
     }
 
-    function statusText(name = "map", total = points.length) {
-      if (view === "roam") return `${name} - ${points.length}/${total} points - click view to lock mouse, WASD move, Q/E up/down, Esc unlock`;
-      return `${name} - ${points.length}/${total} points - drag to pan, wheel to zoom`;
-    }
-
-    function resize() {
-      const ratio = devicePixelRatio || 1;
-      const rect = canvas.getBoundingClientRect();
-      canvas.width = Math.max(1, Math.floor(rect.width * ratio));
-      canvas.height = Math.max(1, Math.floor(rect.height * ratio));
-      draw();
-    }
-
-    function resetView(show = true) {
-      if (bounds) {
-        const sx = view === "top" ? bounds.span[0] : bounds.span[0];
-        const sy = view === "top" ? bounds.span[1] : bounds.span[2];
-        zoom = Math.max(8, Math.min(160, Math.min(canvas.width / Math.max(0.1, sx * 1.25), canvas.height / Math.max(0.1, sy * 1.25))));
-        roam.pos = [bounds.center[0], bounds.center[1], bounds.min[2] + Math.max(1.2, bounds.span[2] * 0.38)];
-        roam.yaw = 0;
-        roam.pitch = 0;
-      }
-      panX = 0;
-      panY = 0;
-      if (show) draw();
-    }
-
-    function projectOrtho(p) {
-      const c = bounds?.center || [0, 0, 0];
-      const x = p[0] - c[0];
-      const y = p[1] - c[1];
-      const z = p[2] - c[2];
-      if (view === "front") return [canvas.width / 2 + panX + x * zoom, canvas.height / 2 + panY - z * zoom, 1];
-      return [canvas.width / 2 + panX + x * zoom, canvas.height / 2 + panY - y * zoom, 1];
-    }
-
-    function roamBasis() {
-      const sy = Math.sin(roam.yaw);
-      const cy = Math.cos(roam.yaw);
-      return {
-        forward: [sy, cy, 0],
-        right: [cy, -sy, 0],
-      };
-    }
-
-    function projectRoam(p) {
-      const dx = p[0] - roam.pos[0];
-      const dy = p[1] - roam.pos[1];
-      const dz = p[2] - roam.pos[2];
-      const basis = roamBasis();
-      const camX = dx * basis.right[0] + dy * basis.right[1];
-      const camY = dx * basis.forward[0] + dy * basis.forward[1];
-      const cp = Math.cos(roam.pitch), sp = Math.sin(roam.pitch);
-      const depth = cp * camY + sp * dz;
-      const vertical = -sp * camY + cp * dz;
-      if (depth <= 0.08) return null;
-      const f = Math.min(canvas.width, canvas.height) * 0.72;
-      return [canvas.width / 2 + (camX / depth) * f, canvas.height / 2 - (vertical / depth) * f, depth];
-    }
-
-    function drawGrid() {
-      if (view === "roam") return;
-      ctx.save();
-      ctx.strokeStyle = "rgba(148,163,184,.18)";
-      ctx.lineWidth = 1;
-      const stepPx = zoom >= 60 ? zoom : zoom * 2;
-      for (let x = (canvas.width / 2 + panX) % stepPx; x < canvas.width; x += stepPx) {
-        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
-      }
-      for (let y = (canvas.height / 2 + panY) % stepPx; y < canvas.height; y += stepPx) {
-        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
-      }
-      ctx.restore();
-    }
-
-    function draw() {
-      if (!ctx) return;
-      ctx.fillStyle = "#0f161d";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      drawGrid();
-      drawFps();
-      if (!points.length || !bounds) return;
-      if (view === "roam") {
-        drawRoam();
-        drawFps();
-        return;
-      }
-      const size = points.length > 120000 ? 1 : 2;
-      for (const p of points) {
-        const [x, y] = projectOrtho(p);
-        if (x < -4 || y < -4 || x > canvas.width + 4 || y > canvas.height + 4) continue;
-        ctx.fillStyle = `rgb(${p[3]},${p[4]},${p[5]})`;
-        ctx.fillRect(x, y, size, size);
-      }
-    }
-
-    function drawRoam() {
-      const projected = [];
-      for (const p of points) {
-        const q = projectRoam(p);
-        if (!q) continue;
-        const [x, y, d] = q;
-        if (x < -20 || y < -20 || x > canvas.width + 20 || y > canvas.height + 20) continue;
-        projected.push([x, y, d, p[3], p[4], p[5]]);
-      }
-      projected.sort((a, b) => b[2] - a[2]);
-      for (const p of projected) {
-        const size = Math.max(1, Math.min(5, 18 / p[2]));
-        ctx.globalAlpha = Math.max(0.28, Math.min(1, 8 / p[2]));
-        ctx.fillStyle = `rgb(${p[3]},${p[4]},${p[5]})`;
-        ctx.fillRect(p[0], p[1], size, size);
-      }
-      ctx.globalAlpha = 1;
-    }
-
-    function drawFps() {
-      ctx.save();
-      ctx.font = '13px monospace';
-      ctx.fillStyle = 'rgba(255,255,255,0.7)';
-      ctx.fillText(fps + ' fps', canvas.width - 70, canvas.height - 12);
-      ctx.restore();
-    }
-
-    function tick(now) {
-      const dt = Math.min(0.05, (now - lastFrame) / 1000);
-      lastFrame = now;
-      fpsFrames++;
-      if (now - fpsTime >= 1000) { fps = fpsFrames; fpsFrames = 0; fpsTime = now; }
-      if (view === "roam" && keys.size) {
-        const { forward, right } = roamBasis();
-        const move = [0, 0, 0];
-        if (keys.has("w")) { move[0] += forward[0]; move[1] += forward[1]; }
-        if (keys.has("s")) { move[0] -= forward[0]; move[1] -= forward[1]; }
-        if (keys.has("d")) { move[0] += right[0]; move[1] += right[1]; }
-        if (keys.has("a")) { move[0] -= right[0]; move[1] -= right[1]; }
-        if (keys.has("e")) move[2] += 1;
-        if (keys.has("q")) move[2] -= 1;
-        const len = Math.hypot(move[0], move[1], move[2]) || 1;
-        const speed = roam.speed * (keys.has("shift") ? 2.5 : 1);
-        roam.pos[0] += move[0] / len * speed * dt;
-        roam.pos[1] += move[1] / len * speed * dt;
-        roam.pos[2] += move[2] / len * speed * dt;
-        draw();
-      }
-      requestAnimationFrame(tick);
-    }
-
-    canvas.addEventListener("pointerdown", e => {
-      if (view === "roam") {
-        canvas.requestPointerLock?.();
-        return;
-      }
-      dragging = true;
-      last = [e.clientX, e.clientY];
-      canvas.setPointerCapture(e.pointerId);
-    });
-    canvas.addEventListener("pointermove", e => {
-      if (!dragging) return;
-      const ratio = devicePixelRatio || 1;
-      const dx = e.clientX - last[0];
-      const dy = e.clientY - last[1];
-      panX += dx * ratio;
-      panY += dy * ratio;
-      last = [e.clientX, e.clientY];
-      draw();
-    });
-    canvas.addEventListener("pointerup", () => dragging = false);
-    canvas.addEventListener("pointercancel", () => dragging = false);
-    canvas.addEventListener("wheel", e => {
-      e.preventDefault();
-      if (view === "roam") roam.speed = Math.max(0.2, Math.min(12, roam.speed * (e.deltaY > 0 ? 0.85 : 1.18)));
-      else zoom *= e.deltaY > 0 ? 0.88 : 1.12;
-      draw();
-    }, { passive: false });
-    window.addEventListener("keydown", e => {
-      const k = e.key.toLowerCase();
-      if (["w","a","s","d","q","e","shift"].includes(k)) { keys.add(k); e.preventDefault(); }
-    });
-    window.addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
-    document.addEventListener("mousemove", e => {
-      if (view !== "roam" || document.pointerLockElement !== canvas) return;
-      roam.yaw += e.movementX * roam.sensitivity;
-      roam.pitch = Math.max(-1.2, Math.min(1.2, roam.pitch - e.movementY * roam.sensitivity));
-      draw();
-    });
-    document.addEventListener("pointerlockchange", () => {
-      if (view === "roam") hud.textContent = document.pointerLockElement === canvas ? "FPS mouse locked - Esc unlocks, WASD move, Q/E up/down" : statusText();
-    });
-    window.addEventListener("resize", resize);
-    document.getElementById("refresh").onclick = loadMaps;
-    document.getElementById("reset").onclick = () => resetView(true);
-    document.getElementById("alignYaw").oninput = e => setAlignment(Number(e.target.value));
-    document.getElementById("alignLeft").onclick = e => setAlignment(alignYawDeg - (e.shiftKey ? 5 : 1));
-    document.getElementById("alignRight").onclick = e => setAlignment(alignYawDeg + (e.shiftKey ? 5 : 1));
     function setAxis(axis) {
       alignAxis = axis;
       localStorage.setItem(alignAxisKey, axis);
-      for (const a of ["axisX","axisY","axisZ"]) document.getElementById(a).classList.remove("active");
-      document.getElementById("axis" + axis.toUpperCase()).classList.add("active");
-      applyAlignment(true);
+      updateAlignmentUi();
     }
-    document.getElementById("axisX").onclick = () => setAxis("x");
-    document.getElementById("axisY").onclick = () => setAxis("y");
-    document.getElementById("axisZ").onclick = () => setAxis("z");
-    setAxis(alignAxis);
+
+    function setPointSize(value) {
+      pointSize = Math.max(0.3, Math.min(5, Number(value) || 1));
+      localStorage.setItem(pointSizeKey, String(pointSize));
+      $("pointSize").value = String(pointSize);
+      $("pointSizeValue").textContent = `${pointSize.toFixed(1)}x`;
+      if (cloudObject) {
+        cloudObject.material.size = pointRenderSize();
+        cloudObject.material.needsUpdate = true;
+      }
+      updateHud();
+    }
+
+    function setMirrorY(enabled) {
+      mirrorY = Boolean(enabled);
+      localStorage.setItem(mirrorYKey, mirrorY ? "on" : "off");
+      $("mirrorY").classList.toggle("active", mirrorY);
+      clearMeasurement();
+      rebuildCloud();
+      rebuildPathVisual();
+      resetView();
+    }
+
     function setView(next) {
-      if (document.pointerLockElement === canvas && next !== "roam") document.exitPointerLock?.();
+      if (document.pointerLockElement === renderer.domElement && next !== "roam") document.exitPointerLock?.();
       view = next;
-      for (const id of ["viewTop", "viewFront", "viewRoam"]) document.getElementById(id).classList.remove("active");
-      document.getElementById(next === "top" ? "viewTop" : next === "front" ? "viewFront" : "viewRoam").classList.add("active");
-      resetView(true);
-      hud.textContent = statusText();
+      for (const id of ["viewTop", "viewFront", "viewFree", "viewRoam"]) $(id).classList.remove("active");
+      $(next === "top" ? "viewTop" : next === "front" ? "viewFront" : next === "free" ? "viewFree" : "viewRoam").classList.add("active");
+      updateHud();
     }
-    document.getElementById("viewTop").onclick = () => setView("top");
-    document.getElementById("viewFront").onclick = () => setView("front");
-    document.getElementById("viewRoam").onclick = () => setView("roam");
-    setAlignment(alignYawDeg);
-    resize();
+
+    function updateRoam(dt) {
+      if (view !== "roam" || !keys.size) return;
+      const forward = new THREE.Vector3(Math.sin(fpsYaw), 0, Math.cos(fpsYaw)).normalize();
+      const right = new THREE.Vector3(-forward.z, 0, forward.x).normalize();
+      const speed = 2.6 * (keys.has("shift") ? 2.5 : 1);
+      if (keys.has("w")) fpsPosition.addScaledVector(forward, speed * dt);
+      if (keys.has("s")) fpsPosition.addScaledVector(forward, -speed * dt);
+      if (keys.has("d")) fpsPosition.addScaledVector(right, speed * dt);
+      if (keys.has("a")) fpsPosition.addScaledVector(right, -speed * dt);
+      if (keys.has("e")) fpsPosition.y += speed * dt;
+      if (keys.has("q")) fpsPosition.y -= speed * dt;
+    }
+
+    function bindPointer() {
+      const el = renderer.domElement;
+      el.addEventListener("pointerdown", (event) => {
+        if (view === "roam" && !measurementMode) {
+          el.requestPointerLock?.();
+          return;
+        }
+        dragging = true;
+        lastPointer = [event.clientX, event.clientY];
+        pointerDown = [event.clientX, event.clientY];
+        el.setPointerCapture(event.pointerId);
+      });
+      el.addEventListener("pointermove", (event) => {
+        if (!dragging || !lastPointer) return;
+        if (view === "roam" && measurementMode) return;
+        const dx = event.clientX - lastPointer[0];
+        const dy = event.clientY - lastPointer[1];
+        if (view === "top" || view === "front") {
+          const scale = orbitDistance / Math.max(260, viewer.clientHeight);
+          cameraTarget.x -= dx * scale;
+          if (view === "top") cameraTarget.z -= dy * scale;
+          else cameraTarget.y += dy * scale;
+        } else {
+          orbitYaw -= dx * 0.006;
+          orbitPitch = Math.max(0.12, Math.min(1.45, orbitPitch + dy * 0.006));
+        }
+        lastPointer = [event.clientX, event.clientY];
+      });
+      el.addEventListener("pointerup", (event) => {
+        const wasClick = pointerDown && Math.hypot(event.clientX - pointerDown[0], event.clientY - pointerDown[1]) <= 6;
+        dragging = false;
+        lastPointer = null;
+        pointerDown = null;
+        if (wasClick && pickPoint(event)) event.preventDefault();
+      });
+      el.addEventListener("pointercancel", () => { dragging = false; lastPointer = null; pointerDown = null; });
+      el.addEventListener("wheel", (event) => {
+        event.preventDefault();
+        if (view === "roam") {
+          const dir = new THREE.Vector3(Math.sin(fpsYaw), 0, Math.cos(fpsYaw)).normalize();
+          fpsPosition.addScaledVector(dir, event.deltaY > 0 ? -0.5 : 0.5);
+        } else {
+          orbitDistance = Math.max(1.5, Math.min(240, orbitDistance * (event.deltaY > 0 ? 1.12 : 0.88)));
+        }
+      }, { passive: false });
+      document.addEventListener("mousemove", (event) => {
+        if (view !== "roam" || document.pointerLockElement !== el) return;
+        fpsYaw -= event.movementX * 0.0025;
+        fpsPitch = Math.max(-1.25, Math.min(1.25, fpsPitch - event.movementY * 0.0025));
+      });
+      document.addEventListener("pointerlockchange", updateHud);
+    }
+
+    window.addEventListener("keydown", (event) => {
+      const key = event.key.toLowerCase();
+      if (["w", "a", "s", "d", "q", "e", "shift"].includes(key)) {
+        keys.add(key);
+        event.preventDefault();
+      }
+    });
+    window.addEventListener("keyup", (event) => keys.delete(event.key.toLowerCase()));
+    window.addEventListener("resize", resize);
+
+    $("refresh").onclick = loadMaps;
+    $("reset").onclick = resetView;
+    $("alignYaw").oninput = event => setAlignment(Number(event.target.value));
+    $("alignLeft").onclick = event => setAlignment(alignDegs[alignAxis] - (event.shiftKey ? 5 : 1));
+    $("alignRight").onclick = event => setAlignment(alignDegs[alignAxis] + (event.shiftKey ? 5 : 1));
+    $("axisX").onclick = () => setAxis("x");
+    $("axisY").onclick = () => setAxis("y");
+    $("axisZ").onclick = () => setAxis("z");
+    $("viewTop").onclick = () => setView("top");
+    $("viewFront").onclick = () => setView("front");
+    $("viewFree").onclick = () => setView("free");
+    $("viewRoam").onclick = () => setView("roam");
+    $("pointSize").oninput = event => setPointSize(event.target.value);
+    $("mirrorY").onclick = () => setMirrorY(!mirrorY);
+    $("measureToggle").onclick = () => setMeasurementMode(!measurementMode);
+    $("measureClear").onclick = () => clearMeasurement();
+    $("togglePath").onclick = () => {
+      showPath = !showPath;
+      $("togglePath").classList.toggle("active", showPath);
+      if (pathLine) pathLine.visible = showPath;
+      if (poseMarker) poseMarker.visible = showPath;
+    };
+    $("toggleFollow").onclick = () => {
+      followReplay = !followReplay;
+      $("toggleFollow").classList.toggle("active", followReplay);
+      if (followReplay) updateReplayPose();
+    };
+    $("replayPlay").onclick = () => {
+      if (!replay) return;
+      const dur = Math.max(0, Number(replay.duration) || Math.max(0, (replay.t1 || 0) - (replay.t0 || 0)));
+      if (replayTime >= dur - 1e-3) replayTime = 0;
+      replayPlaying = !replayPlaying;
+      $("replayPlay").textContent = replayPlaying ? "暂停" : "播放";
+    };
+    $("replayStop").onclick = () => stopReplay(true);
+    $("replaySlider").oninput = (event) => {
+      if (!replay) return;
+      const dur = Math.max(0, Number(replay.duration) || Math.max(0, (replay.t1 || 0) - (replay.t0 || 0)));
+      replayTime = (Number(event.target.value) / 1000) * dur;
+      replayPlaying = false;
+      $("replayPlay").textContent = "播放";
+      updateReplayPose();
+    };
+    $("replaySpeed").onclick = () => {
+      const order = [0.5, 1, 2, 4];
+      const idx = order.indexOf(replaySpeed);
+      replaySpeed = order[(idx + 1) % order.length];
+      $("replaySpeed").textContent = `${replaySpeed}×`;
+      $("replaySpeed").dataset.speed = String(replaySpeed);
+    };
+
+    initThree();
+    bindPointer();
+    updateAlignmentUi();
+    setPointSize(pointSize);
+    setMirrorY(mirrorY);
+    setView(view);
     loadMaps();
-    requestAnimationFrame(tick);
   </script>
 </body>
 </html>

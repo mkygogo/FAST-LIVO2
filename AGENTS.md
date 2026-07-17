@@ -490,12 +490,18 @@ working/export tree.
 
 The offline map viewer (`map_viewer.html`) provides:
 
-- PCD and PLY file loading with automatic down-sampling to 180k points
-- View modes: top-down (俯视), front (前视), roam/FPS (漫游)
+- Three.js PCD/PLY loading with browser-side down-sampling for large clouds
+- View modes: top-down (俯视), front (前视), free orbit (自由查看), roam/FPS (漫游)
 - Manual 3-axis alignment (X/Y/Z rotation) to correct tilt in scanned maps
 - Alignment angle persisted in browser localStorage
 - Real-time FPS counter
+- Point sizing, Y mirror, point-to-point measurement, and optional scan replay
 - Roam mode: WASD movement, Q/E vertical, mouse-look with pointer lock
+
+Map loading must be race-safe. `loadMaps()` may schedule at most one default PCD,
+and an older in-flight PCD/replay request must never overwrite a file selected
+later by the operator. Keep the generation-token checks in `loadCloud()` and
+`loadReplayForMap()` when changing asynchronous loading.
 
 ## Gaussian Splatting (LOD-3DGS) — Current Path
 
