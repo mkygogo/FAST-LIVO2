@@ -26,6 +26,8 @@ class ImageStreamer:
         self.quality = max(35, min(95, quality))
         self.bridge = CvBridge() if CvBridge is not None else None
         self.last_emit = 0.0
+        self.last_frame_time = 0.0
+        self.emit_credit = 1.0
         self.active_topic = ""
         self.counts = {}
         self.last_rates = time.time()
@@ -57,8 +59,15 @@ class ImageStreamer:
         preferred = self.topics[0] if self.topics else topic
         if self.active_topic and topic != self.active_topic and self.active_topic == preferred:
             return False
-        if now - self.last_emit < self.min_period:
+        if self.last_frame_time <= 0:
+            self.last_frame_time = now
+        else:
+            elapsed = max(0.0, min(0.5, now - self.last_frame_time))
+            self.last_frame_time = now
+            self.emit_credit = min(2.0, self.emit_credit + elapsed / self.min_period)
+        if self.emit_credit + 1e-9 < 1.0:
             return False
+        self.emit_credit = max(0.0, self.emit_credit - 1.0)
         self.last_emit = now
         self.active_topic = topic
         return True
@@ -131,7 +140,7 @@ class ImageStreamer:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--topics", default="/rgb_img,/left_camera/image")
+    parser.add_argument("--topics", default="/left_camera/image,/rgb_img")
     parser.add_argument("--hz", type=float, default=5.0)
     parser.add_argument("--width", type=int, default=560)
     parser.add_argument("--quality", type=int, default=72)

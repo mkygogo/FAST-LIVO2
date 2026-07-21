@@ -9,6 +9,11 @@ let cameraExposureLast = null;
 let cameraExposureStableFrames = 0;
 let cameraConfigParams = {};
 let scanState = "idle";
+let recordState = "idle";
+let workflowMode = "idle";
+let pointStreamMode = "mapping";
+let cameraStreamProfile = "default";
+let lastOfflineStatus = "";
 let sceneMode = "live";
 let qualityMode = localStorage.getItem("jr.preview.quality") || "mini";
 let colorBoostEnabled = localStorage.getItem("jr.preview.colorBoost") !== "off";
@@ -98,7 +103,15 @@ function setScanState(state, detail = "") {
   setText("scanStateText", detail || labels[state] || state);
   $("startScan").disabled = state === "starting" || state === "scanning" || state === "saving";
   $("finishScan").disabled = state === "idle" || state === "starting" || state === "saving";
-  $("startScan").textContent = state === "complete" ? "重新建图" : "开始建图";
+  $("startScan").textContent = state === "complete" ? "重新实时建图" : "开始实时建图";
+}
+
+function setRecordState(state, detail = "") {
+  recordState = state;
+  const labels = {idle: "未开始", starting: "设备启动中", recording: "正在无损录制", stopping: "正在完成bag索引", valid: "录制完成，数据完整", invalid: "数据校验异常"};
+  setText("recordStateText", detail || labels[state] || state);
+  $("startRecord").disabled = state === "starting" || state === "recording" || state === "stopping" || workflowMode === "offline_mapping" || workflowMode === "realtime_mapping";
+  $("stopRecord").disabled = state !== "recording";
 }
 
 function wsScheme() {
@@ -172,12 +185,20 @@ function headingToThreeDirection(yaw) {
 function showTab(id) {
   document.querySelectorAll(".tab").forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === id));
   document.querySelectorAll(".page").forEach((page) => page.classList.toggle("active", page.id === id));
-  if (id === "fastlivo") setTimeout(resizeThree, 60);
+  if (id === "fastlivo" || id === "record") {
+    attachThreeRenderer(id === "record" ? "recordThreeViewport" : "threeViewport");
+    setTimeout(resizeThree, 60);
+  }
   if (id === "data") refreshDataMaps();
   if (id === "camera") {
     refreshCameraConfig();
     ensureCameraStream();
   }
+}
+
+function attachThreeRenderer(targetId) {
+  const target = $(targetId);
+  if (renderer?.domElement && target && renderer.domElement.parentElement !== target) target.appendChild(renderer.domElement);
 }
 
 function toggleCameraSettings() {
@@ -240,7 +261,7 @@ function readCameraFormParams() {
     ExposureTime: Number($("camExposure")?.value || 6000),
     ExposureAutoString: cameraExposureMode,
     AutoExposureTimeLowerLimit: 100,
-    AutoExposureTimeUpperLimit: 10000,
+    AutoExposureTimeUpperLimit: Number($("camAutoExposureMax")?.value || 10) * 1000,
     AutoExposureAOIUsageIntensity: true,
     AutoExposureAOIWidth: Number(cameraConfigParams.AutoExposureAOIWidth || 1840),
     AutoExposureAOIHeight: Number(cameraConfigParams.AutoExposureAOIHeight || 1536),
@@ -266,6 +287,23 @@ function fillCameraForm(params = {}) {
     else el.value = value;
   };
   setVal("camExposure", params.ExposureTime);
+  if (params.AutoExposureTimeUpperLimit != null) {
+    const autoLimit = $("camAutoExposureMax");
+    const autoLimitMs = Number(params.AutoExposureTimeUpperLimit) / 1000;
+    if (autoLimit) {
+      autoLimit.querySelector("[data-current-value]")?.remove();
+      const supported = Array.from(autoLimit.options).some((option) => Number(option.value) === autoLimitMs);
+      if (!supported) {
+        const current = document.createElement("option");
+        current.value = String(autoLimitMs);
+        const label = Number.isInteger(autoLimitMs) ? String(autoLimitMs) : autoLimitMs.toFixed(1);
+        current.textContent = `当前 ${label} ms（请选择新档位）`;
+        current.dataset.currentValue = "true";
+        autoLimit.prepend(current);
+      }
+      autoLimit.value = String(autoLimitMs);
+    }
+  }
   setVal("camGainAuto", params.GainAuto);
   setVal("camFrameRate", params.FrameRate);
   setVal("camFrameRateEnable", params.FrameRateEnable);
@@ -460,15 +498,16 @@ function renderDataList() {
     return;
   }
   if (!dataMaps.length) {
-    list.innerHTML = `<div class="data-list-empty">暂无已保存建图<br>完成建图后会出现在此</div>`;
+    list.innerHTML = `<div class="data-list-empty">暂无扫描数据<br>完成录制后会出现在此</div>`;
     return;
   }
   list.innerHTML = dataMaps.map((map) => {
     const active = map.id === selectedDataMapId ? " active" : "";
     const sub = map.saved_at || formatTime(map.mtime);
     const size = map.total_size != null ? fmtSize(map.total_size) : "";
+    const labels = {recording: "录制中", ready: "待建图", running: "建图中", completed: "已完成", failed: "失败", cancelled: "已停止", invalid: "数据异常"};
     return `<button type="button" class="data-list-item${active}" data-map-id="${escapeHtml(map.id)}">
-      ${escapeHtml(map.id)}
+      ${escapeHtml(map.id)} · ${escapeHtml(labels[map.status] || map.status || "-")}
       <span>${escapeHtml(sub)}${size ? ` · ${escapeHtml(size)}` : ""}</span>
     </button>`;
   }).join("");
@@ -480,10 +519,12 @@ function renderDataList() {
 function renderDataDetail(map) {
   const detail = $("dataMapDetail");
   const previewBtn = $("openDataPreview");
+  const offlineBtn = $("startOfflineMap");
   if (!detail) return;
   if (!map) {
     detail.innerHTML = `<div class="empty"><strong>选择左侧扫描记录</strong><span>完成建图后，结果会出现在此列表</span></div>`;
     if (previewBtn) previewBtn.disabled = true;
+    if (offlineBtn) offlineBtn.disabled = true;
     return;
   }
   const files = map.files || [];
@@ -492,6 +533,9 @@ function renderDataDetail(map) {
     ? files.map((f) => `<tr><td>${escapeHtml(f.name)}</td><td>${escapeHtml(fmtSize(f.size))}</td><td>${escapeHtml(formatTime(f.mtime))}</td></tr>`).join("")
     : `<tr><td colspan="3">无白名单文件</td></tr>`;
   const metaBits = [];
+  const labels = {recording: "录制中", ready: "待离线建图", running: "离线建图中", completed: "已完成", failed: "建图失败，可重试", cancelled: "已停止，可重试", invalid: "原始数据异常"};
+  metaBits.push(`状态 ${escapeHtml(labels[map.status] || map.status || "-")}`);
+  if (map.bag_duration != null) metaBits.push(`时长 ${Number(map.bag_duration).toFixed(1)} 秒`);
   if (map.saved_at) metaBits.push(`保存时间 ${escapeHtml(map.saved_at)}`);
   if (map.copied_count != null) metaBits.push(`已复制 ${map.copied_count}`);
   if (map.missing_count != null && map.missing_count > 0) metaBits.push(`缺失 ${map.missing_count}`);
@@ -513,6 +557,10 @@ function renderDataDetail(map) {
     ${hint}
   `;
   if (previewBtn) previewBtn.disabled = !previewFile;
+  if (offlineBtn) {
+    offlineBtn.disabled = !map.can_offline_map;
+    offlineBtn.textContent = map.has_map ? "重新离线建图" : "离线建图";
+  }
 }
 
 function selectDataMap(id) {
@@ -529,10 +577,10 @@ async function refreshDataMaps() {
   if (btn) btn.disabled = true;
   renderDataList();
   try {
-    const res = await fetch("/api/fastlivo/maps", { cache: "no-store" });
+    const res = await fetch("/api/fastlivo/scans", { cache: "no-store" });
     const data = await res.json();
     if (!res.ok || data.ok === false) throw new Error(data.message || `HTTP ${res.status}`);
-    dataMaps = data.maps || [];
+    dataMaps = data.scans || [];
     if (selectedDataMapId && !dataMaps.some((m) => m.id === selectedDataMapId)) {
       selectedDataMapId = null;
     }
@@ -547,6 +595,47 @@ async function refreshDataMaps() {
     dataMapsLoading = false;
     if (btn) btn.disabled = false;
   }
+}
+
+async function startOfflineMap() {
+  const scan = dataMaps.find((item) => item.id === selectedDataMapId);
+  if (!scan?.can_offline_map) return;
+  if (scan.has_map && !window.confirm("将重新处理原始bag；只有新结果完整通过验证后才会替换当前地图。继续吗？")) return;
+  try {
+    const res = await fetch("/api/fastlivo/offline/start", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({scan_id: scan.id}),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.message || data.output || `HTTP ${res.status}`);
+    lastOfflineStatus = "starting";
+    renderOfflineProgress(data.job || {});
+    await refreshDataMaps();
+    toast("离线建图已开始，可以留在数据管理页查看进度");
+  } catch (err) {
+    toast(`离线建图启动失败: ${err.message}`);
+  }
+}
+
+async function cancelOfflineMap() {
+  try {
+    const res = await fetch("/api/fastlivo/offline/cancel", {method: "POST"});
+    const data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.message || `HTTP ${res.status}`);
+    toast("正在安全停止离线建图");
+  } catch (err) {
+    toast(`停止失败: ${err.message}`);
+  }
+}
+
+function renderOfflineProgress(job = {}) {
+  const active = ["starting", "running", "draining", "saving", "cancel_requested"].includes(job.status);
+  const box = $("offlineProgress");
+  if (box) box.hidden = !active && !["failed", "cancelled"].includes(job.status);
+  $("cancelOfflineMap").hidden = !active;
+  const labels = {starting: "启动FAST-LIVO2", running: job.paused ? "积压较高，已暂停回放" : "正在回放原始数据", draining: "回放结束，正在排空缓存", saving: "正在保存并验证模型", cancel_requested: "正在安全停止", failed: `失败：${job.error || "未知错误"}`, cancelled: "离线建图已停止"};
+  setText("offlineProgressText", labels[job.status] || "离线建图");
+  setText("offlineLagText", job.lag != null ? `积压 ${Number(job.lag).toFixed(2)} 秒` : "-");
+  if ($("offlineProgressBar")) $("offlineProgressBar").value = Math.round(Number(job.progress || 0) * 100);
 }
 
 async function openDataPreview() {
@@ -656,16 +745,58 @@ async function refreshStatus() {
       : `<span class="chip">暂无 ROS topic</span>`;
     setText("cameraState", topics.some((t) => t.includes("camera") || t.includes("rgb_img")) ? "检测到图像 topic" : "等待硬件");
 
+    workflowMode = data.workflow || "idle";
+    if (workflowMode !== "realtime_mapping") {
+      $("startScan").disabled = workflowMode !== "idle";
+      $("finishScan").disabled = true;
+    }
+    const recording = data.recording || {};
+    if (recording.active) {
+      setRecordState("recording", "正在无损录制");
+      setText("recordElapsed", `${Math.floor(Number(recording.elapsed || 0) / 60)}:${String(Math.floor(Number(recording.elapsed || 0) % 60)).padStart(2, "0")}`);
+      setText("recordSize", fmtSize(recording.size || 0));
+      setText("recordDiskFree", fmtSize(recording.free_bytes || 0));
+      setText("recordTimeLeft", recording.estimated_seconds_left == null ? "计算中" : `${Math.floor(recording.estimated_seconds_left / 60)} 分钟`);
+      setText("recordScanId", recording.scan_id || "-");
+      $("recordHealth")?.classList.toggle("warning", Boolean(recording.warning));
+      if (!cameraWs) ensureCameraStream("recording");
+      if (!pointWs) ensurePointStream("lidar");
+    } else if (recordState === "recording") {
+      setRecordState("idle");
+    } else {
+      setRecordState(recordState);
+    }
+
+    const offline = data.offline || {};
+    const previousOfflineStatus = lastOfflineStatus;
+    renderOfflineProgress(offline);
+    lastOfflineStatus = offline.status || "";
+    const activeOfflineStates = ["starting", "running", "draining", "saving", "cancel_requested"];
+    if (previousOfflineStatus && activeOfflineStates.includes(previousOfflineStatus) && offline.status === "completed") {
+      await refreshDataMaps();
+      await loadMapFile(offline.scan_id, offline.result_file || "all_raw_points.pcd");
+      showTab("fastlivo");
+      setScanState("complete", `离线建图完成 · ${offline.scan_id}`);
+      toast("离线建图完成，已加载最终模型");
+    } else if (previousOfflineStatus !== lastOfflineStatus && $("data")?.classList.contains("active")) {
+      await refreshDataMaps();
+    }
+
     const running = data.running || {};
     if (running.lidar?.length && $("hzLidar").textContent === "-") setText("hzLidar", "驱动运行中");
-    if (running.fusion?.length && scanState === "idle") {
+    if (workflowMode === "realtime_mapping" && running.fusion?.length && scanState === "idle") {
       sceneMode = "live";
       setViewMode("fps");
-      ensureCameraStream();
-      ensurePointStream();
+      ensureCameraStream("default");
+      ensurePointStream("mapping");
       setScanState("scanning", "扫描中");
     }
-    if (!running.fusion?.length && scanState === "scanning") setScanState("idle");
+    if (workflowMode !== "realtime_mapping" && scanState === "scanning") setScanState("idle");
+    const processing = data.processing || {};
+    if (workflowMode === "realtime_mapping" && processing.lag != null) {
+      const lag = Number(processing.lag);
+      setScanState("scanning", lag > 2 ? `实时地图落后 ${lag.toFixed(1)} 秒，原始bag仍在保存` : `实时建图中 · 积压 ${lag.toFixed(2)} 秒`);
+    }
   } catch (err) {
     setText("serviceState", "离线");
   }
@@ -681,13 +812,20 @@ async function loadLogs(target) {
 }
 
 function updateRates(rates) {
-  if (rates["/livox/lidar"] != null) setText("hzLidar", `${rates["/livox/lidar"]} Hz`);
-  if (rates["/livox/imu"] != null) setText("hzImu", `${rates["/livox/imu"]} Hz`);
+  if (rates["/livox/lidar"] != null) {
+    setText("hzLidar", `${rates["/livox/lidar"]} Hz`);
+    setText("recordLidarHz", `${rates["/livox/lidar"]} / ${rates["/livox/imu"] ?? "-"} Hz`);
+  }
+  if (rates["/livox/imu"] != null) {
+    setText("hzImu", `${rates["/livox/imu"]} Hz`);
+    setText("recordLidarHz", `${rates["/livox/lidar"] ?? "-"} / ${rates["/livox/imu"]} Hz`);
+  }
   if (rates["/cloud_registered"] != null) setText("hzCloud", `${rates["/cloud_registered"]} Hz`);
   if (rates["/path"] != null) setText("hzPath", `${rates["/path"]} Hz`);
   if (rates["/aft_mapped_to_init"] != null) setText("hzOdom", `${rates["/aft_mapped_to_init"]} Hz`);
   if (rates["/rgb_img"] != null || rates["/left_camera/image"] != null) {
     setText("cameraMeta", `/rgb_img ${rates["/rgb_img"] ?? "-"} Hz · /left_camera/image ${rates["/left_camera/image"] ?? "-"} Hz`);
+    setText("recordCameraHz", `${rates["/left_camera/image"] ?? rates["/rgb_img"] ?? "-"} Hz`);
   }
 }
 
@@ -712,17 +850,19 @@ function closeCameraStream() {
 }
 
 function cameraStreamShouldReconnect() {
-  return Boolean($("camera")?.classList.contains("active") || scanState === "starting" || scanState === "scanning");
+  return Boolean($("camera")?.classList.contains("active") || scanState === "starting" || scanState === "scanning" || recordState === "starting" || recordState === "recording");
 }
 
-function ensurePointStream() {
-  if (pointWs) return;
-  pointWs = new WebSocket(`${wsScheme()}://${location.host}/ws/points?mode=mapping&quality=${qualityMode}`);
+function ensurePointStream(mode = pointStreamMode) {
+  if (pointWs && pointStreamMode === mode) return;
+  if (pointWs) closePointStream();
+  pointStreamMode = mode;
+  pointWs = new WebSocket(`${wsScheme()}://${location.host}/ws/points?mode=${encodeURIComponent(mode)}&quality=${qualityMode}`);
   $("connectStreams").textContent = "重连预览";
   pointWs.onopen = () => setText("viewerMeta", "三维实时预览已连接");
   pointWs.onclose = () => {
     pointWs = null;
-    if (sceneMode === "live") setText("viewerMeta", "三维实时预览已断开");
+    if (sceneMode === "live") setText(mode === "lidar" ? "recordMapHud" : "viewerMeta", "三维实时预览已断开");
   };
   pointWs.onerror = () => toast("三维连接失败");
   pointWs.onmessage = (event) => {
@@ -731,17 +871,19 @@ function ensurePointStream() {
     else if (msg.type === "path") updatePath(msg);
     else if (msg.type === "odom") updateOdom(msg);
     else if (msg.type === "rates") updateRates(msg.rates || {});
-    else if (msg.type === "status") setText("viewerMeta", msg.message);
+    else if (msg.type === "status") setText(mode === "lidar" ? "recordMapHud" : "viewerMeta", msg.message);
   };
 }
 
-function ensureCameraStream() {
-  if (cameraWs) return;
+function ensureCameraStream(profile = cameraStreamProfile) {
+  if (cameraWs && cameraStreamProfile === profile) return;
+  if (cameraWs) closeCameraStream();
+  cameraStreamProfile = profile;
   if (cameraReconnectTimer) {
     clearTimeout(cameraReconnectTimer);
     cameraReconnectTimer = null;
   }
-  const socket = new WebSocket(`${wsScheme()}://${location.host}/ws/camera?quality=${qualityMode}`);
+  const socket = new WebSocket(`${wsScheme()}://${location.host}/ws/camera?quality=${qualityMode}&profile=${encodeURIComponent(profile)}`);
   cameraWs = socket;
   socket.onopen = () => setText("cameraMeta", "视频连接中");
   socket.onclose = () => {
@@ -775,6 +917,13 @@ function ensureCameraStream() {
       }
       if ($("cameraEmpty")) $("cameraEmpty").style.display = "none";
       setText("cameraMeta", `${msg.topic || "image"} · ${msg.width || "?"}x${msg.height || "?"}`);
+      const recordImg = $("recordCameraImage");
+      if (recordImg) {
+        recordImg.src = src;
+        recordImg.style.display = "block";
+      }
+      if ($("recordCameraEmpty")) $("recordCameraEmpty").style.display = "none";
+      setText("recordCameraMeta", `${msg.topic || "image"} · ${msg.width || "?"}x${msg.height || "?"}`);
       const dbg = $("cameraDebugImage");
       if (dbg) {
         dbg.src = src;
@@ -783,11 +932,13 @@ function ensureCameraStream() {
       if ($("cameraDebugEmpty")) $("cameraDebugEmpty").style.display = "none";
       setText("cameraDebugMeta", `${msg.topic || "image"} · ${msg.width || "?"}x${msg.height || "?"}`);
       updateCameraExposure(msg.exposure_us);
+      if (msg.exposure_us) setText("recordExposure", Number(msg.exposure_us) >= 1000 ? `${(Number(msg.exposure_us) / 1000).toFixed(2)} ms` : `${Number(msg.exposure_us).toFixed(0)} µs`);
     } else if ((msg.type === "rate" || msg.type === "rates") && msg.rates) {
       updateRates(msg.rates);
     } else if (msg.type === "status") {
       setText("cameraMeta", msg.message || "视频状态更新");
       setText("cameraDebugMeta", msg.message || "视频状态更新");
+      setText("recordCameraMeta", msg.message || "视频状态更新");
     }
   };
 }
@@ -810,10 +961,10 @@ async function startScanWorkflow() {
     const res = await fetch("/api/fastlivo/start_all", { method: "POST" });
     const data = await res.json();
     if (!data.ok) throw new Error(data.output || data.message || "启动失败");
-    ensureCameraStream();
-    ensurePointStream();
+    ensureCameraStream("default");
+    ensurePointStream("mapping");
     setScanState("scanning", "扫描中");
-    toast("建图已开始");
+    toast("实时建图已开始");
   } catch (err) {
     setScanState("error", `启动失败: ${err.message}`);
     toast(`启动失败: ${err.message}`);
@@ -837,6 +988,56 @@ async function finishScanWorkflow() {
   } catch (err) {
     setScanState("error", `保存失败: ${err.message}`);
     toast(`保存失败: ${err.message}`);
+  } finally {
+    await refreshStatus();
+  }
+}
+
+async function startRecordWorkflow() {
+  showTab("record");
+  setRecordState("starting");
+  closePointStream();
+  closeCameraStream();
+  clearScene(false);
+  sceneMode = "live";
+  setViewMode("free");
+  try {
+    const res = await fetch("/api/fastlivo/record/start", {method: "POST"});
+    const data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.message || data.output || `HTTP ${res.status}`);
+    setText("recordScanId", data.scan_id || "-");
+    ensureCameraStream("recording");
+    ensurePointStream("lidar");
+    setRecordState("recording");
+    toast("无损数据录制已开始");
+  } catch (err) {
+    setRecordState("invalid", `启动失败: ${err.message}`);
+    toast(`录制启动失败: ${err.message}`);
+  } finally {
+    await refreshStatus();
+  }
+}
+
+async function stopRecordWorkflow() {
+  setRecordState("stopping");
+  try {
+    const res = await fetch("/api/fastlivo/record/stop", {method: "POST"});
+    const data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.message || (data.bag_info?.errors || []).join("；") || `HTTP ${res.status}`);
+    closePointStream();
+    closeCameraStream();
+    selectedDataMapId = data.scan_id || selectedDataMapId;
+    setRecordState("valid");
+    await refreshDataMaps();
+    showTab("data");
+    toast("录制完成，数据校验通过；请选择离线建图");
+  } catch (err) {
+    closePointStream();
+    closeCameraStream();
+    setRecordState("invalid", `录制结束，但校验异常: ${err.message}`);
+    await refreshDataMaps();
+    showTab("data");
+    toast(`数据校验异常: ${err.message}`);
   } finally {
     await refreshStatus();
   }
@@ -1024,7 +1225,8 @@ function initThree() {
 
 function resizeThree() {
   if (!renderer || !camera) return;
-  const rect = $("threeViewport").getBoundingClientRect();
+  const host = renderer.domElement.parentElement || $("threeViewport");
+  const rect = host.getBoundingClientRect();
   renderer.setSize(Math.max(1, Math.floor(rect.width)), Math.max(1, Math.floor(rect.height)), false);
   camera.aspect = Math.max(1, rect.width) / Math.max(1, rect.height);
   camera.updateProjectionMatrix();
@@ -1085,10 +1287,16 @@ function updateCameraPose() {
 
 function addLivePointBatch(msg) {
   sceneMode = "live";
-  rawPointTotal += msg.raw_count || 0;
-  addPointObject(msg.points || [], { hasRgb: Boolean(msg.has_rgb), replace: false });
+  const rawLidar = msg.mode === "lidar" || pointStreamMode === "lidar";
+  rawPointTotal = rawLidar ? (msg.raw_count || 0) : rawPointTotal + (msg.raw_count || 0);
+  addPointObject(msg.points || [], { hasRgb: Boolean(msg.has_rgb), replace: rawLidar });
   lastPointStamp = Date.now();
-  setText("viewerMeta", `${msg.topic} · 累计 ${formatCount(totalPoints)} · 本批 ${msg.count}/${msg.raw_count} · ${msg.rgb_status || "rgb"}`);
+  if (rawLidar) {
+    setText("recordMapMeta", `${formatCount(totalPoints)} / ${formatCount(msg.raw_count || 0)} 点`);
+    setText("recordMapHud", `${msg.topic} · 最新帧 · ${msg.count}/${msg.raw_count}`);
+  } else {
+    setText("viewerMeta", `${msg.topic} · 累计 ${formatCount(totalPoints)} · 本批 ${msg.count}/${msg.raw_count} · ${msg.rgb_status || "rgb"}`);
+  }
 }
 
 function addPointObject(rows, options = {}) {
@@ -1220,6 +1428,10 @@ function updateMapStats() {
     : formatCount(totalPoints);
   setText("mapMeta", `${pointText} 点 · ${rgbText}`);
   setText("mapHud", `${modeText} · ${viewMode === "fps" ? "FPS" : viewMode === "top" ? "俯视" : "自由"} · ${followEnabled ? "跟随" : "手动"} · ${qualityMode === "pc" ? "PC" : "小主机"} · ${rgbText} · ${tiltText} · ${renderFps} fps · 延迟 ${age} · 轨迹 ${pathPoints.length}`);
+  if (pointStreamMode === "lidar") {
+    setText("recordMapMeta", `${formatCount(totalPoints)} 点`);
+    setText("recordMapHud", `原始雷达最新帧 · ${renderFps} fps · 延迟 ${age}`);
+  }
 }
 
 function updatePointMaterials() {
@@ -1353,8 +1565,9 @@ function blockBrowserChrome(el) {
 
 function initThreePointer() {
   const wrap = $("threeWrap");
-  const el = $("threeViewport");
+  const el = renderer?.domElement;
   blockBrowserChrome(wrap);
+  blockBrowserChrome($("recordThreeViewport"));
   blockBrowserChrome(el);
   el.addEventListener("pointerdown", (event) => {
     event.preventDefault();
@@ -1473,8 +1686,8 @@ function reconnectStreams() {
   sceneMode = "live";
   closePointStream();
   closeCameraStream();
-  ensureCameraStream();
-  ensurePointStream();
+  ensureCameraStream("default");
+  ensurePointStream("mapping");
   setScanState("scanning", "扫描中");
 }
 
@@ -1484,6 +1697,8 @@ function bindUi() {
   document.querySelectorAll("[data-log]").forEach((btn) => btn.addEventListener("click", () => loadLogs(btn.dataset.log)));
   $("startScan").addEventListener("click", startScanWorkflow);
   $("finishScan").addEventListener("click", finishScanWorkflow);
+  $("startRecord").addEventListener("click", startRecordWorkflow);
+  $("stopRecord").addEventListener("click", stopRecordWorkflow);
   $("viewFps").addEventListener("click", () => {
     followEnabled = sceneMode === "live";
     setViewMode("fps");
@@ -1505,11 +1720,14 @@ function bindUi() {
   $("loadLatestMap").addEventListener("click", () => loadLatestMap().catch((err) => toast(err.message)));
   $("refreshDataMaps")?.addEventListener("click", () => refreshDataMaps());
   $("openDataPreview")?.addEventListener("click", () => openDataPreview());
+  $("startOfflineMap")?.addEventListener("click", () => startOfflineMap());
+  $("cancelOfflineMap")?.addEventListener("click", () => cancelOfflineMap());
   $("connectStreams").addEventListener("click", reconnectStreams);
   $("toggleFullscreen").addEventListener("click", toggleFullscreen);
   $("gsListDatasets")?.addEventListener("click", listGsDatasets);
   $("gsSyncLatest")?.addEventListener("click", syncLatestGsDataset);
   $("refreshCameraConfig")?.addEventListener("click", () => refreshCameraConfig());
+  $("applyCameraAutoLimit")?.addEventListener("click", () => applyCameraConfig(true));
   $("applyCameraConfig")?.addEventListener("click", () => applyCameraConfig(true));
   $("saveCameraConfigOnly")?.addEventListener("click", () => applyCameraConfig(false));
   $("cameraSettingsToggle")?.addEventListener("click", toggleCameraSettings);
@@ -1523,7 +1741,7 @@ function bindUi() {
       setCameraConfigDirty(true);
     });
   });
-  ["camGainAuto", "camFrameRateEnable", "camGammaEnable", "camSaturationEnable"].forEach((id) => {
+  ["camAutoExposureMax", "camGainAuto", "camFrameRateEnable", "camGammaEnable", "camSaturationEnable"].forEach((id) => {
     $(id)?.addEventListener("change", () => setCameraConfigDirty(true));
   });
   document.querySelectorAll("[data-camera-preset]").forEach((btn) => {
@@ -1541,6 +1759,7 @@ setColorBoost(colorBoostEnabled, true);
 setTiltCorrection(tiltCorrectionEnabled, true);
 setPointSizeScale(pointSizeScale);
 setScanState("idle");
+setRecordState("idle");
 setViewMode("fps");
 updateFullscreenButton();
 refreshStatus();

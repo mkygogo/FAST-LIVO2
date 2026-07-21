@@ -16,7 +16,8 @@
   </header>
 
   <nav class="tabs" aria-label="页面">
-    <button class="tab active" data-tab="fastlivo">建图</button>
+    <button class="tab active" data-tab="fastlivo">实时建图</button>
+    <button class="tab" data-tab="record">录制数据</button>
     <button class="tab" data-tab="data">数据管理</button>
     <button class="tab" data-tab="overview">设备概览</button>
     <button class="tab" data-tab="lidar">雷达调试</button>
@@ -31,12 +32,12 @@
       <section class="scan-shell">
         <div class="scan-bar">
           <div>
-            <h2>扫描建图</h2>
+            <h2>实时建图</h2>
             <p id="scanStateText">未开始</p>
           </div>
           <div class="scan-actions">
-            <button id="startScan" class="primary">开始建图</button>
-            <button id="finishScan" class="danger">完成建图</button>
+            <button id="startScan" class="primary">开始实时建图</button>
+            <button id="finishScan" class="danger">停止实时建图</button>
           </div>
         </div>
 
@@ -104,11 +105,55 @@
       </section>
     </section>
 
+    <section id="record" class="page">
+      <section class="scan-shell record-shell">
+        <div class="scan-bar">
+          <div>
+            <h2>录制数据</h2>
+            <p id="recordStateText">未开始</p>
+          </div>
+          <div class="scan-actions">
+            <button id="startRecord" class="primary">开始录制</button>
+            <button id="stopRecord" class="danger" disabled>结束录制</button>
+          </div>
+        </div>
+
+        <div class="record-health" id="recordHealth">
+          <div><span>录制时长</span><strong id="recordElapsed">-</strong></div>
+          <div><span>数据大小</span><strong id="recordSize">-</strong></div>
+          <div><span>磁盘剩余</span><strong id="recordDiskFree">-</strong></div>
+          <div><span>预计可录</span><strong id="recordTimeLeft">-</strong></div>
+          <div><span>相机</span><strong id="recordCameraHz">-</strong></div>
+          <div><span>雷达 / IMU</span><strong id="recordLidarHz">-</strong></div>
+          <div><span>曝光</span><strong id="recordExposure">-</strong></div>
+          <div><span>扫描 ID</span><strong id="recordScanId">-</strong></div>
+        </div>
+
+        <div class="scan-preview">
+          <section class="video-panel">
+            <div class="panel-title"><strong>低延迟视频</strong><span id="recordCameraMeta">未连接</span></div>
+            <div class="camera-frame">
+              <img id="recordCameraImage" alt="录制视频预览">
+              <div id="recordCameraEmpty">等待 /left_camera/image</div>
+            </div>
+          </section>
+          <section class="map-panel">
+            <div class="panel-title"><strong>原始雷达当前帧</strong><span id="recordMapMeta">0 点</span></div>
+            <div class="three-wrap record-three-wrap">
+              <div id="recordThreeViewport"></div>
+              <div class="map-hud" id="recordMapHud">未连接</div>
+            </div>
+          </section>
+        </div>
+        <p class="record-note">录制期间不运行 FAST-LIVO2；原始相机、雷达和 IMU 无损写入 bag。三维区域仅显示雷达最新一帧。</p>
+      </section>
+    </section>
+
     <section id="data" class="page">
       <section class="panel data-shell">
         <div class="data-list-col">
           <div class="data-list-head">
-            <h2>已保存建图</h2>
+            <h2>扫描数据</h2>
             <button id="refreshDataMaps" type="button">刷新</button>
           </div>
           <div id="dataMapList" class="data-list" aria-label="建图列表">
@@ -124,6 +169,12 @@
           </div>
           <div class="data-detail-actions">
             <button id="openDataPreview" class="primary" type="button" disabled>打开预览</button>
+            <button id="startOfflineMap" type="button" disabled>离线建图</button>
+            <button id="cancelOfflineMap" class="danger" type="button" hidden>停止离线建图</button>
+          </div>
+          <div id="offlineProgress" class="offline-progress" hidden>
+            <div><strong id="offlineProgressText">离线建图准备中</strong><span id="offlineLagText">-</span></div>
+            <progress id="offlineProgressBar" max="100" value="0"></progress>
           </div>
         </div>
       </section>
@@ -241,6 +292,18 @@
               <button type="button" data-exposure-mode="Once">自动一次</button>
               <button type="button" data-exposure-mode="Continuous">连续自动</button>
             </div>
+            <label class="camera-control camera-auto-limit">
+              <span class="camera-control-title">自动曝光上限</span>
+              <small class="camera-control-help">室内可试 20–30 ms；数值越大越亮，但移动拖影也越明显。</small>
+              <select id="camAutoExposureMax">
+                <option value="10">10 ms</option>
+                <option value="20">20 ms</option>
+                <option value="30">30 ms</option>
+                <option value="40">40 ms</option>
+                <option value="50">50 ms</option>
+              </select>
+            </label>
+            <button type="button" class="camera-auto-limit-apply" id="applyCameraAutoLimit">应用曝光上限并重启</button>
             <small>切换后相机会重启约 2 秒；自动曝光只计算画面中央区域，并保持自动增益关闭。</small>
           </div>
           <div class="camera-presets" id="cameraPresetActions">

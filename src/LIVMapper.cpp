@@ -41,11 +41,15 @@ LIVMapper::LIVMapper(ros::NodeHandle &nh)
   root_dir = ROOT_DIR;
   initializeFiles();
   initializeComponents();
+  startImageSaver();
   path.header.stamp = ros::Time::now();
   path.header.frame_id = "camera_init";
 }
 
-LIVMapper::~LIVMapper() {}
+LIVMapper::~LIVMapper()
+{
+  stopImageSaver();
+}
 
 void LIVMapper::readParameters(ros::NodeHandle &nh)
 {
@@ -98,6 +102,10 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<int>("pcd_save/type", pcd_save_type, 0);
   nh.param<bool>("image_save/img_save_en", img_save_en, false);
   nh.param<int>("image_save/interval", img_save_interval, 1);
+  nh.param<int>("image_save/max_queue", img_save_max_queue, 120);
+  nh.param<int>("image_save/png_compression", img_save_png_compression, 1);
+  img_save_max_queue = std::max(8, img_save_max_queue);
+  img_save_png_compression = std::max(0, std::min(9, img_save_png_compression));
 
   nh.param<bool>("pcd_save/colmap_output_en", colmap_output_en, false);
   nh.param<double>("pcd_save/filter_size_pcd", filter_size_pcd, 0.5);
@@ -204,6 +212,8 @@ void LIVMapper::initializeSubscribersAndPublishers(ros::NodeHandle &nh, image_tr
   pubLaserCloudMap = nh.advertise<sensor_msgs::PointCloud2>("/Laser_map", 100);
   pubOdomAftMapped = nh.advertise<nav_msgs::Odometry>("/aft_mapped_to_init", 10);
   pubPath = nh.advertise<nav_msgs::Path>("/path", 10);
+  pubProcessingLag = nh.advertise<std_msgs::Float64>("/fast_livo2/processing_lag", 10);
+  pubProcessingStatus = nh.advertise<std_msgs::Float64MultiArray>("/fast_livo2/processing_status", 10);
   plane_pub = nh.advertise<visualization_msgs::Marker>("/planner_normal", 1);
   voxel_pub = nh.advertise<visualization_msgs::MarkerArray>("/voxels", 1);
   pubLaserCloudDyn = nh.advertise<sensor_msgs::PointCloud2>("/dyn_obj", 100);
@@ -531,6 +541,76 @@ void LIVMapper::savePCD()
   }
 }
 
+void LIVMapper::startImageSaver()
+{
+  if (!img_save_en) return;
+  image_save_stopping = false;
+  image_save_thread = std::thread(&LIVMapper::imageSaveWorker, this);
+  ROS_INFO("Async image saver started: max_queue=%d, png_compression=%d", img_save_max_queue, img_save_png_compression);
+}
+
+void LIVMapper::stopImageSaver()
+{
+  if (!image_save_thread.joinable()) return;
+  {
+    std::lock_guard<std::mutex> lock(image_save_mutex);
+    image_save_stopping = true;
+  }
+  image_save_cv.notify_all();
+  image_save_thread.join();
+  fout_visual_pos.flush();
+  ROS_INFO("Async image saver stopped: written=%zu, dropped=%zu", image_save_written, image_save_dropped);
+}
+
+void LIVMapper::enqueueImageSave(const std::string &path, const cv::Mat &image, const std::string &pose_line)
+{
+  std::lock_guard<std::mutex> lock(image_save_mutex);
+  if (image_save_queue.size() >= static_cast<size_t>(img_save_max_queue))
+  {
+    image_save_dropped++;
+    ROS_WARN_THROTTLE(2.0, "Async image save queue full (%zu); dropping frame", image_save_queue.size());
+    return;
+  }
+  image_save_queue.push_back({path, image.clone(), pose_line});
+  image_save_cv.notify_one();
+}
+
+void LIVMapper::imageSaveWorker()
+{
+  const std::vector<int> png_params = {cv::IMWRITE_PNG_COMPRESSION, img_save_png_compression};
+  while (true)
+  {
+    ImageSaveTask task;
+    {
+      std::unique_lock<std::mutex> lock(image_save_mutex);
+      image_save_cv.wait(lock, [this] { return image_save_stopping || !image_save_queue.empty(); });
+      if (image_save_queue.empty())
+      {
+        if (image_save_stopping) break;
+        continue;
+      }
+      task = std::move(image_save_queue.front());
+      image_save_queue.pop_front();
+    }
+    try
+    {
+      if (cv::imwrite(task.path, task.image, png_params))
+      {
+        fout_visual_pos << task.pose_line << std::endl;
+        image_save_written++;
+      }
+      else
+      {
+        ROS_ERROR("Failed to save image: %s", task.path.c_str());
+      }
+    }
+    catch (const cv::Exception &exc)
+    {
+      ROS_ERROR("Image save exception for %s: %s", task.path.c_str(), exc.what());
+    }
+  }
+}
+
 void LIVMapper::run() 
 {
   ros::Rate rate(5000);
@@ -549,6 +629,40 @@ void LIVMapper::run()
     // if (!p_imu->imu_time_init) continue;
 
     stateEstimationAndMapping();
+    last_processed_sensor_time = LidarMeasures.lio_vio_flg == VIO
+                                   ? LidarMeasures.measures.back().vio_time
+                                   : LidarMeasures.measures.back().lio_time;
+    std_msgs::Float64 lag_msg;
+    lag_msg.data = std::max(0.0, std::max(last_timestamp_img, last_timestamp_lidar) - last_processed_sensor_time);
+    pubProcessingLag.publish(lag_msg);
+    std_msgs::Float64MultiArray status_msg;
+    size_t lidar_buffer_size = 0, image_buffer_size = 0, imu_buffer_size = 0;
+    size_t image_save_queue_size = 0, image_save_written_count = 0, image_save_dropped_count = 0;
+    {
+      std::lock_guard<std::mutex> lock(mtx_buffer);
+      lidar_buffer_size = lid_raw_data_buffer.size();
+      image_buffer_size = img_buffer.size();
+      imu_buffer_size = imu_buffer.size();
+    }
+    {
+      std::lock_guard<std::mutex> lock(image_save_mutex);
+      image_save_queue_size = image_save_queue.size();
+      image_save_written_count = image_save_written;
+      image_save_dropped_count = image_save_dropped;
+    }
+    status_msg.data = {
+      std::max(last_timestamp_img, last_timestamp_lidar),
+      last_processed_sensor_time,
+      lag_msg.data,
+      static_cast<double>(lidar_buffer_size),
+      static_cast<double>(image_buffer_size),
+      static_cast<double>(imu_buffer_size),
+      static_cast<double>(image_save_queue_size),
+      static_cast<double>(image_save_written_count),
+      static_cast<double>(image_save_dropped_count)
+    };
+    pubProcessingStatus.publish(status_msg);
+    ROS_INFO_THROTTLE(5.0, "FAST-LIVO2 processing lag: %.3f s", lag_msg.data);
   }
   savePCD();
 }
@@ -1122,7 +1236,7 @@ void LIVMapper::publish_img_rgb(const image_transport::Publisher &pubImage, VIOM
 {
   cv::Mat img_rgb = vio_manager->img_cp;
   cv_bridge::CvImage out_msg;
-  out_msg.header.stamp = ros::Time::now();
+  out_msg.header.stamp = ros::Time().fromSec(LidarMeasures.measures.back().vio_time);
   // out_msg.header.frame_id = "camera_init";
   out_msg.encoding = sensor_msgs::image_encodings::BGR8;
   out_msg.image = img_rgb;
@@ -1275,12 +1389,12 @@ void LIVMapper::publish_frame_world(const ros::Publisher &pubLaserCloudFullRes, 
 
     if (img_save_interval > 0 && img_wait_num >= img_save_interval)
     {
-      imwrite(string(string(ROOT_DIR) + "Log/image/") + ss_time.str() + string(".png"), vio_manager->img_rgb);
-      
       Eigen::Quaterniond q(_state.rot_end);
-      fout_visual_pos << std::fixed << std::setprecision(6);
-      fout_visual_pos << LidarMeasures.measures.back().vio_time << " " << _state.pos_end[0] << " " << _state.pos_end[1] << " " << _state.pos_end[2] << " "
-            << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << std::endl;
+      std::ostringstream pose_stream;
+      pose_stream << std::fixed << std::setprecision(6)
+                  << LidarMeasures.measures.back().vio_time << " " << _state.pos_end[0] << " " << _state.pos_end[1] << " " << _state.pos_end[2] << " "
+                  << q.x() << " " << q.y() << " " << q.z() << " " << q.w();
+      enqueueImageSave(string(string(ROOT_DIR) + "Log/image/") + ss_time.str() + string(".png"), vio_manager->img_rgb, pose_stream.str());
       img_wait_num = 0;
     }
   }

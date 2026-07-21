@@ -12,6 +12,8 @@
   <arg name="colmap_output_en" default="true" />
   <arg name="img_save_en" default="true" />
   <arg name="img_save_interval" default="1" />
+  <arg name="img_save_max_queue" default="120" />
+  <arg name="img_save_png_compression" default="1" />
   <arg name="pose_output_en" default="true" />
 
   <rosparam command="load" file="$(find fast_livo)/config/mid360.yaml" />
@@ -25,6 +27,8 @@
   <param name="pcd_save/colmap_output_en" value="$(arg colmap_output_en)" />
   <param name="image_save/img_save_en" value="$(arg img_save_en)" />
   <param name="image_save/interval" value="$(arg img_save_interval)" />
+  <param name="image_save/max_queue" value="$(arg img_save_max_queue)" />
+  <param name="image_save/png_compression" value="$(arg img_save_png_compression)" />
   <param name="evo/pose_output_en" value="$(arg pose_output_en)" />
 
   <node pkg="jr_fastlivo_validation"

@@ -14,9 +14,9 @@ first production-facing interface is a local browser console at:
 http://localhost:8090
 ```
 
-The console lets the operator start and stop the Mid360 driver, start LiDAR-only
-mapping through FAST_LIO, inspect logs/status, record bags, and preview live
-point clouds on a touch screen.
+The console lets the operator run FAST-LIVO2 in real time or use the preferred
+capture-first workflow: record complete camera/LiDAR/IMU bags with lightweight
+previews, then build the map offline from Data Management.
 
 ## Repository Layout
 
@@ -183,23 +183,36 @@ The deployment uses `docker compose run -T --rm --name <name> fast-livo2 bash -l
 
 Keep the UI model simple for the touch-screen operator:
 
-- Tab order: `建图` → `数据管理` → `设备概览` → `雷达调试` → `相机调试` →
+- Tab order: `实时建图` → `录制数据` → `数据管理` → `设备概览` → `雷达调试` → `相机调试` →
   `录包` → `日志` → `设置`.
-- The `建图` page is the default and primary page. It owns the production
-  scanning flow and combines start/finish controls, camera video, live 3D map,
-  and final model viewing in one place.
-- `开始建图` must start the Mid360 driver, the Hikrobot camera, and
+- The `实时建图` page remains the default. It combines start/finish controls,
+  camera video, a live FAST-LIVO2 map, and final model viewing. It remains useful
+  for a future faster host, but the reliable production flow is `录制数据` →
+  `数据管理` → `离线建图`.
+- `开始实时建图` must start the Mid360 driver, the Hikrobot camera, and
   `fast_livo2_mapping`, then automatically connect `/ws/camera` and
   `/ws/points?mode=mapping`.
-- `完成建图` must first stop `fast_livo2_mapping` gracefully so FAST-LIVO2 runs
+- `停止实时建图` must first stop `fast_livo2_mapping` gracefully so FAST-LIVO2 runs
   its official `savePCD()` path.  The stop uses `docker exec` + `pkill -INT -f
   roslaunch` (NOT `docker kill --signal=SIGINT`, which only reaches bash PID 1).
   After PCD is saved, stop the Hikrobot camera and Mid360 driver, then load the
   saved `all_raw_points.pcd` in the 3D viewer.
-- `数据管理` lists saved maps under `fast_livo2_maps/<timestamp>/` (left list,
+- `录制数据` starts only the Mid360, Hikrobot camera, and a lossless LZ4 bag for
+  `/left_camera/image`, `/livox/lidar`, and `/livox/imu`; it must not start
+  FAST-LIVO2. The video preview is low latency and the 3D preview replaces each
+  batch with the latest raw LiDAR frame instead of accumulating unregistered data.
+- Recording, real-time mapping, and offline mapping are mutually exclusive.
+  A recording is eligible for offline mapping only after SIGINT-finalized bag
+  indexing and required-topic/rate validation succeed. Raw bags are retained.
+- Offline mapping replays at 0.5x and pauses playback when mapper lag exceeds 2s,
+  resuming below 0.5s. Results replace an existing map only after PCD, image,
+  pose, zero-drop, export, and archive validation all succeed.
+- `数据管理` lists scan records under `fast_livo2_maps/<timestamp>/` (left list,
   right detail). **打开预览** reuses `loadMapFile()` and switches back to the
-  `建图` page (prefer `all_raw_points.pcd`, fallback downsampled). API:
-  `GET /api/fastlivo/maps` and `GET /api/fastlivo/maps/<id>/<file>`.
+  `实时建图` page (prefer `all_raw_points.pcd`, fallback downsampled). It also
+  starts/retries offline mapping for records containing a valid raw bag. API:
+  `GET /api/fastlivo/scans`, offline start/status/cancel endpoints, plus the
+  existing map file endpoints.
 - `设备概览` shows host/memory/network status plus **磁盘与数据**: whole-disk
   total/used/free, `fast_livo2_maps` size + scan count, and `bags` size + bag
   count. `/api/status` includes a `storage` object (dir sizes cached ~30s).
@@ -217,8 +230,8 @@ mode rewrites the camera YAML and restarts only the camera container (about two
 seconds). Manual indoor/outdoor/bright presets always switch exposure back to
 `Off`.
 
-Production `开始建图` writes `ExposureAutoString: Once` before starting the
-camera. Default hardware-auto settings are:
+Both `开始实时建图` and `开始录制` write `ExposureAutoString: Once` before
+starting the camera. Default hardware-auto settings are:
 
 ```text
 AutoExposureTimeLowerLimit: 100 us

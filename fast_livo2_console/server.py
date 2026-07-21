@@ -6,11 +6,14 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import signal
 import shutil
 import subprocess
+import threading
 import time
 import urllib.parse
+import uuid
 
 
 ROOT = pathlib.Path(__file__).resolve().parent
@@ -29,6 +32,8 @@ FASTLIVO_LOG_DIR = FASTLIVO_ROOT / "Log"
 FASTLIVO_PCD_DIR = HOME / "fast_livo2_ws" / "src" / "FAST-LIVO2" / "Log" / "pcd"
 FASTLIVO_CONFIG_DIR = FASTLIVO_ROOT / "config"
 FASTLIVO_ACTIVE_SCAN = OUTPUT_DIR / "active_fast_livo2_scan.json"
+FASTLIVO_ACTIVE_RECORDING = OUTPUT_DIR / "active_fast_livo2_recording.json"
+FASTLIVO_OFFLINE_JOB = OUTPUT_DIR / "fast_livo2_offline_job.json"
 GS_SYNC_TARGET = os.environ.get("GS_LIVO_SYNC_TARGET", "jr@192.168.3.38:~/fast_livo2/gs_livo_datasets/")
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("FAST_LIVO2_CONSOLE_PORT", "8090"))
@@ -41,7 +46,14 @@ CONTAINERS = {
     "fusion": ["fast_livo2_mapping"],
     "bag": ["fast_livo2_bag_record"],
     "gs_bag": ["fast_livo2_gs_raw_bag_record"],
+    "offline_play": ["fast_livo2_offline_bag_play"],
 }
+
+WORKFLOW_LOCK = threading.RLock()
+GIB = 1024 ** 3
+RECORD_WARN_FREE = 30 * GIB
+RECORD_MIN_START_FREE = 15 * GIB
+RECORD_AUTO_STOP_FREE = 8 * GIB
 
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -156,7 +168,7 @@ def run_livox_sleep():
 
 
 def action_stop_scan_runtime():
-    names = CONTAINERS["lidar"] + CONTAINERS["camera"] + CONTAINERS["lio"] + CONTAINERS["bag"] + CONTAINERS["gs_bag"]
+    names = CONTAINERS["lidar"] + CONTAINERS["camera"] + CONTAINERS["lio"] + CONTAINERS["bag"] + CONTAINERS["gs_bag"] + CONTAINERS["offline_play"]
     stopped = docker_rm(names)
     sleep_res = run_livox_sleep()
     output = "\n".join(part for part in [stopped.get("output", ""), sleep_res.get("output", "")] if part)
@@ -181,6 +193,7 @@ def docker_sigint_wait(name, timeout=75):
          "pkill -INT -f roslaunch 2>/dev/null; "
          "pkill -INT -f fastlivo_mapping 2>/dev/null; "
          "pkill -INT -f 'rosbag record' 2>/dev/null; "
+         "pkill -INT -f 'rosbag play' 2>/dev/null; "
          "exit 0"],
         timeout=8,
         cwd=DEPLOY_DIR,
@@ -205,6 +218,97 @@ def docker_sigint_wait(name, timeout=75):
     }
 
 
+def fastlivo_processing_status():
+    """Read mapper progress and queue sizes without stopping the container."""
+    if "fast_livo2_mapping" not in docker_all_names():
+        return {"ok": False, "lag": None, "output": "fast_livo2_mapping not running"}
+    res = run_cmd(
+        [
+            "docker", "exec", "fast_livo2_mapping", "bash", "-lc",
+            "source /opt/ros/noetic/setup.bash; "
+            "source /home/jr/fast_livo2_ws/devel/setup.bash; "
+            "timeout 3 rostopic echo -n 1 /fast_livo2/processing_status",
+        ],
+        timeout=5,
+        cwd=DEPLOY_DIR,
+    )
+    match = re.search(r"data:\s*\[([^\]]+)\]", res.get("output", ""), re.S)
+    values = []
+    if match:
+        try:
+            values = [float(value.strip()) for value in match.group(1).replace("\n", " ").split(",") if value.strip()]
+        except ValueError:
+            values = []
+    if len(values) < 9:
+        return {"ok": False, "lag": None, "output": res.get("output", "")[-1000:]}
+    keys = (
+        "last_received", "last_processed", "lag", "lidar_buffer", "image_buffer",
+        "imu_buffer", "image_save_queue", "image_save_written", "image_save_dropped",
+    )
+    status = dict(zip(keys, values[:9]))
+    for key in ("lidar_buffer", "image_buffer", "imu_buffer", "image_save_queue", "image_save_written", "image_save_dropped"):
+        status[key] = int(status[key])
+    status.update({"ok": True, "output": res.get("output", "")[-1000:]})
+    return status
+
+
+def fastlivo_processing_lag():
+    status = fastlivo_processing_status()
+    if status.get("ok"):
+        return status
+    if "fast_livo2_mapping" not in docker_all_names():
+        return status
+    res = run_cmd(
+        docker_exec_ros_cmd("fast_livo2_mapping", "timeout 3 rostopic echo -n 1 /fast_livo2/processing_lag"),
+        timeout=5,
+        cwd=DEPLOY_DIR,
+    )
+    match = re.search(r"(?:^|\n)data:\s*([0-9]+(?:\.[0-9]+)?)", res.get("output", ""))
+    lag = float(match.group(1)) if match else None
+    return {"ok": lag is not None, "lag": lag, "output": res.get("output", "")[-500:]}
+
+
+def wait_fastlivo_catch_up(max_wait=30, target_lag=0.5):
+    """Give FAST-LIVO2 time to consume queued sensor frames before SIGINT."""
+    started = time.time()
+    samples = []
+    consecutive_ready = 0
+    while time.time() - started < max_wait:
+        probe = fastlivo_processing_lag()
+        lag = probe.get("lag")
+        if lag is None:
+            return {
+                "ok": False,
+                "available": False,
+                "waited": round(time.time() - started, 1),
+                "output": "processing lag topic unavailable; continuing graceful stop",
+            }
+        samples.append(round(lag, 3))
+        if lag <= target_lag:
+            consecutive_ready += 1
+            if consecutive_ready >= 2:
+                return {
+                    "ok": True,
+                    "available": True,
+                    "waited": round(time.time() - started, 1),
+                    "lag": lag,
+                    "samples": samples[-10:],
+                    "output": f"FAST-LIVO2 caught up; processing lag={lag:.3f}s",
+                }
+        else:
+            consecutive_ready = 0
+        time.sleep(1)
+    lag = samples[-1] if samples else None
+    return {
+        "ok": False,
+        "available": True,
+        "waited": round(time.time() - started, 1),
+        "lag": lag,
+        "samples": samples[-10:],
+        "output": f"FAST-LIVO2 still has {lag:.3f}s processing lag after {max_wait}s" if lag is not None else "processing lag unavailable",
+    }
+
+
 def read_active_fastlivo_scan():
     try:
         return json.loads(FASTLIVO_ACTIVE_SCAN.read_text(encoding="utf-8"))
@@ -222,6 +326,37 @@ def clear_active_fastlivo_scan():
         FASTLIVO_ACTIVE_SCAN.unlink()
     except FileNotFoundError:
         pass
+
+
+def atomic_write_json(path, data):
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def read_active_recording():
+    return read_json_file(FASTLIVO_ACTIVE_RECORDING)
+
+
+def write_active_recording(info):
+    atomic_write_json(FASTLIVO_ACTIVE_RECORDING, info)
+
+
+def clear_active_recording():
+    try:
+        FASTLIVO_ACTIVE_RECORDING.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def read_offline_job():
+    return read_json_file(FASTLIVO_OFFLINE_JOB)
+
+
+def write_offline_job(info):
+    atomic_write_json(FASTLIVO_OFFLINE_JOB, info)
 
 
 def safe_remove_path(path, root):
@@ -286,6 +421,22 @@ def export_gs_livo_dataset(scan_dir, raw_bag=None):
     if raw_bag:
         args.extend(["--raw-bag", str(raw_bag)])
     res = run_cmd(args, timeout=180, cwd=DEPLOY_DIR)
+    if raw_bag:
+        source_bag = pathlib.Path(raw_bag).resolve()
+        exported_bag = GS_DATASET_ROOT / pathlib.Path(scan_dir).name / "raw" / source_bag.name
+        try:
+            if exported_bag.exists() or exported_bag.is_symlink():
+                if exported_bag.exists() and os.path.samefile(source_bag, exported_bag):
+                    pass
+                else:
+                    exported_bag.unlink()
+            if not exported_bag.exists() and not exported_bag.is_symlink():
+                try:
+                    os.link(source_bag, exported_bag)
+                except OSError:
+                    os.symlink(source_bag, exported_bag)
+        except OSError as exc:
+            res["raw_bag_link_warning"] = str(exc)
     try:
         res["metadata"] = json.loads(res.get("output", "{}"))
     except Exception:
@@ -405,6 +556,128 @@ def copy_fastlivo_outputs(scan_dir, extra_logs=None, raw_bag=None):
     return metadata
 
 
+def filesystem_free_bytes(path=DATA_DIR):
+    usage = shutil.disk_usage(path)
+    return usage.free
+
+
+def find_scan_bag(scan_dir):
+    scan_dir = pathlib.Path(scan_dir)
+    bags = sorted(
+        (path for path in scan_dir.glob("*.bag") if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    return bags[0] if bags else None
+
+
+def inspect_rosbag(path):
+    path = pathlib.Path(path)
+    if not path.is_file():
+        return {"ok": False, "valid": False, "errors": [f"bag不存在: {path}"]}
+    cmd = ros_env_cmd(f"rosbag info --yaml {shlex.quote(str(path))}")
+    res = run_cmd(cmd, timeout=90, cwd=DEPLOY_DIR)
+    output = res.get("output", "")
+    info = {"path": str(path), "size": path.stat().st_size, "topics": {}, "errors": [], "warnings": []}
+    for key in ("duration", "start", "end"):
+        match = re.search(rf"(?m)^{key}:\s*([0-9]+(?:\.[0-9]+)?)", output)
+        if match:
+            info[key] = float(match.group(1))
+    info["indexed"] = bool(re.search(r"(?m)^indexed:\s*True\s*$", output))
+    for match in re.finditer(r"(?ms)^\s*- topic:\s*(\S+).*?^\s+messages:\s*(\d+)\s*$", output):
+        info["topics"][match.group(1)] = int(match.group(2))
+    duration = float(info.get("duration") or 0.0)
+    required_rates = {"/left_camera/image": 8.0, "/livox/lidar": 5.0, "/livox/imu": 100.0}
+    if not res.get("ok"):
+        info["errors"].append("rosbag info读取失败")
+    if not info.get("indexed"):
+        info["errors"].append("bag索引未完成")
+    if duration < 1.0:
+        info["errors"].append("录制时长不足1秒")
+    for topic, min_rate in required_rates.items():
+        count = info["topics"].get(topic, 0)
+        if count <= 0:
+            info["errors"].append(f"缺少{topic}")
+        elif duration >= 3.0 and count / duration < min_rate:
+            info["errors"].append(f"{topic}平均频率过低: {count / duration:.1f}Hz")
+    info["valid"] = not info["errors"]
+    info["ok"] = bool(res.get("ok"))
+    info["output"] = output[-2000:]
+    return info
+
+
+def scan_workflow_status(scan_dir, metadata, has_map, has_bag):
+    workflow = metadata.get("workflow") or {}
+    offline = workflow.get("offline") or {}
+    recording = workflow.get("recording") or {}
+    status = offline.get("status") or recording.get("status")
+    if status in ("running", "failed", "cancelled"):
+        return status
+    if status in ("valid", "invalid") and not has_map:
+        return "ready" if status == "valid" else "invalid"
+    if has_map:
+        return "completed"
+    if has_bag:
+        return "ready"
+    return "invalid"
+
+
+def list_fastlivo_scans():
+    ensure_dirs()
+    scans = []
+    active_record = read_active_recording()
+    offline_job = read_offline_job()
+    for scan_dir in sorted((p for p in FASTLIVO_MAP_ROOT.iterdir() if p.is_dir() and not p.name.startswith(".")), key=lambda p: p.stat().st_mtime, reverse=True):
+        metadata = read_json_file(scan_dir / "metadata.json")
+        bag = find_scan_bag(scan_dir)
+        raw_pcd = scan_dir / "all_raw_points.pcd"
+        down_pcd = scan_dir / "all_downsampled_points.pcd"
+        has_map = raw_pcd.is_file() or down_pcd.is_file()
+        status = scan_workflow_status(scan_dir, metadata, has_map, bag is not None)
+        if active_record.get("scan_id") == scan_dir.name:
+            status = "recording"
+        if offline_job.get("scan_id") == scan_dir.name and offline_job.get("status") in ("starting", "running", "draining", "saving", "cancel_requested"):
+            status = "running"
+        files = []
+        for path in (bag, raw_pcd if raw_pcd.is_file() else None, down_pcd if down_pcd.is_file() else None, scan_dir / "metadata.json"):
+            if path and pathlib.Path(path).is_file():
+                st = pathlib.Path(path).stat()
+                files.append({"name": pathlib.Path(path).name, "size": st.st_size, "mtime": st.st_mtime})
+        bag_meta = ((metadata.get("workflow") or {}).get("recording") or {}).get("bag_info") or {}
+        scans.append({
+            "id": scan_dir.name,
+            "path": str(scan_dir),
+            "mtime": scan_dir.stat().st_mtime,
+            "status": status,
+            "files": files,
+            "bag": str(bag) if bag else None,
+            "bag_size": bag.stat().st_size if bag else None,
+            "bag_duration": bag_meta.get("duration"),
+            "bag_valid": bag_meta.get("valid") if bag_meta else None,
+            "has_raw": raw_pcd.is_file(),
+            "has_downsampled": down_pcd.is_file(),
+            "has_map": has_map,
+            "can_offline_map": bool(bag and status not in ("recording", "running", "invalid")),
+            "saved_at": metadata.get("saved_at"),
+            "workflow": metadata.get("workflow") or {},
+            "total_size": sum(item["size"] for item in files),
+        })
+    return {"ok": True, "root": str(FASTLIVO_MAP_ROOT), "scans": scans}
+
+
+def update_scan_workflow(scan_dir, section, values):
+    scan_dir = pathlib.Path(scan_dir)
+    metadata_path = scan_dir / "metadata.json"
+    metadata = read_json_file(metadata_path)
+    metadata.setdefault("scan_id", scan_dir.name)
+    metadata.setdefault("scan_dir", str(scan_dir))
+    workflow = metadata.setdefault("workflow", {})
+    current = workflow.setdefault(section, {})
+    current.update(values)
+    atomic_write_json(metadata_path, metadata)
+    return metadata
+
+
 def list_fastlivo_maps():
     ensure_dirs()
     maps = []
@@ -448,7 +721,7 @@ def read_json_file(path):
 
 
 def write_json_file(path, data):
-    pathlib.Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(path, data)
 
 
 def list_gs_datasets():
@@ -506,6 +779,7 @@ def action_gs_sync_latest():
     rsync_res = run_cmd([
         "rsync",
         "-av",
+        "--copy-links",
         "--info=progress2",
         "-e",
         "ssh -o BatchMode=yes",
@@ -573,22 +847,22 @@ def ros_env_cmd(inner):
     ]
 
 
-def named_ros_env_cmd(container_name, inner):
-    return [
+def named_ros_env_cmd(container_name, inner, remove=True):
+    args = [
         "docker",
         "compose",
         "run",
         "-T",
-        "--rm",
-        "--name",
-        container_name,
-        "fast-livo2",
-        "bash",
-        "-lc",
+    ]
+    if remove:
+        args.append("--rm")
+    args.extend([
+        "--name", container_name, "fast-livo2", "bash", "-lc",
         "source /opt/ros/noetic/setup.bash; "
         "source /home/jr/fast_livo2_ws/devel/setup.bash; "
         + inner,
-    ]
+    ])
+    return args
 
 
 def docker_exec_ros_cmd(container_name, inner):
@@ -719,6 +993,10 @@ def api_status():
         topic_lines = [line.strip() for line in topics["output"].splitlines() if line.strip().startswith("/")] if topics["ok"] else []
     else:
         topic_lines = []
+    workflow = active_workflow()
+    processing = {}
+    if workflow == "realtime_mapping" and "fast_livo2_mapping" in current_names:
+        processing = fastlivo_processing_status()
     return {
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "host": run_cmd(["hostname"], timeout=2)["output"].strip(),
@@ -734,6 +1012,15 @@ def api_status():
         "containers": containers,
         "running": running,
         "topics": topic_lines,
+        "workflow": workflow,
+        "recording": record_runtime_status(),
+        "offline": read_offline_job(),
+        "processing": processing,
+        "recording_limits": {
+            "warn_free_bytes": RECORD_WARN_FREE,
+            "min_start_free_bytes": RECORD_MIN_START_FREE,
+            "auto_stop_free_bytes": RECORD_AUTO_STOP_FREE,
+        },
     }
 
 
@@ -982,11 +1269,11 @@ def normalize_camera_params(raw):
         errors.append("ExposureAutoString: expected Off, Once or Continuous")
         mode = "Off"
 
-    lower = as_int("AutoExposureTimeLowerLimit", base["AutoExposureTimeLowerLimit"], 15, 10000)
-    upper = as_int("AutoExposureTimeUpperLimit", base["AutoExposureTimeUpperLimit"], 10, 10000)
+    lower = as_int("AutoExposureTimeLowerLimit", base["AutoExposureTimeLowerLimit"], 15, 49999)
+    upper = as_int("AutoExposureTimeUpperLimit", base["AutoExposureTimeUpperLimit"], 1000, 50000)
     if upper <= lower:
         errors.append("AutoExposureTimeUpperLimit: must be greater than lower limit")
-        upper = min(10000, lower + 1)
+        upper = min(50000, lower + 1)
 
     def aligned_int(key, default, lo, hi):
         return (as_int(key, default, lo, hi) // 4) * 4
@@ -1051,7 +1338,7 @@ def camera_config_status():
         "limits": {
             "ExposureTime": {"min": 50, "max": 100000, "unit": "us"},
             "ExposureAutoString": {"values": ["Off", "Once", "Continuous"]},
-            "AutoExposureTime": {"min": 15, "max": 10000, "unit": "us"},
+            "AutoExposureTime": {"min": 15, "max": 50000, "unit": "us"},
             "FrameRate": {"min": 1, "max": 60},
             "Gamma": {"min": 0.1, "max": 4.0},
             "GainAuto": {"values": {"0": "Off", "1": "Once", "2": "Continuous"}},
@@ -1121,6 +1408,451 @@ def action_camera_stop():
     return docker_rm(CONTAINERS["camera"])
 
 
+def prepare_scan_camera():
+    params = camera_config_status()["params"]
+    params.update({
+        "ExposureAutoString": "Once",
+        "AutoExposureTimeLowerLimit": 100,
+        "GainAuto": 0,
+    })
+    params, _ = normalize_camera_params(params)
+    write_camera_config_yaml(CAMERA_CONFIG_PATH, params)
+    stopped = action_camera_stop()
+    started = action_camera_start()
+    return {"ok": bool(started.get("ok")), "stop": stopped, "start": started, "params": params}
+
+
+def wait_for_topic_message(container_name, topic, timeout=20):
+    deadline = time.time() + timeout
+    while time.time() < deadline and container_name not in docker_all_names():
+        time.sleep(0.5)
+    if container_name not in docker_all_names():
+        return {"ok": False, "output": f"容器未在{timeout}秒内启动: {container_name}"}
+    last = {"ok": False, "output": f"等待{topic}"}
+    while time.time() < deadline:
+        last = run_cmd(
+            docker_exec_ros_cmd(container_name, f"timeout 3 rostopic echo -n 1 {shlex.quote(topic)} >/dev/null"),
+            timeout=5,
+            cwd=DEPLOY_DIR,
+        )
+        if last.get("ok"):
+            return last
+        time.sleep(0.5)
+    return last
+
+
+def wait_for_lidar_ready():
+    lidar = wait_for_topic_message("mid360_driver", "/livox/lidar", timeout=20)
+    imu = wait_for_topic_message("mid360_driver", "/livox/imu", timeout=10) if lidar.get("ok") else {"ok": False, "output": "等待雷达失败"}
+    return {"ok": bool(lidar.get("ok") and imu.get("ok")), "lidar": lidar, "imu": imu}
+
+
+def wait_for_camera_ready(retry=True):
+    image = wait_for_topic_message("mid360_driver", "/left_camera/image", timeout=25)
+    if image.get("ok") or not retry:
+        return image
+    if not container_running(CONTAINERS["camera"]):
+        action_camera_start()
+        image = wait_for_topic_message("mid360_driver", "/left_camera/image", timeout=25)
+    return image
+
+
+def active_workflow():
+    offline = read_offline_job()
+    if read_active_recording():
+        return "recording"
+    if offline.get("status") in ("starting", "running", "draining", "saving", "cancel_requested"):
+        return "offline_mapping"
+    if container_running(CONTAINERS["fusion"]) or read_active_fastlivo_scan():
+        return "realtime_mapping"
+    if container_running(CONTAINERS["gs_bag"]):
+        return "recording"
+    return "idle"
+
+
+def record_runtime_status():
+    active = read_active_recording()
+    if not active:
+        return {"active": False}
+    bag = pathlib.Path(active.get("bag", ""))
+    started_epoch = float(active.get("started_epoch") or time.time())
+    free = filesystem_free_bytes()
+    size = bag.stat().st_size if bag.is_file() else 0
+    elapsed = max(0.0, time.time() - started_epoch)
+    byte_rate = size / elapsed if elapsed > 1 else 0
+    return {
+        "active": True,
+        "scan_id": active.get("scan_id"),
+        "bag": str(bag),
+        "size": size,
+        "elapsed": round(elapsed, 1),
+        "free_bytes": free,
+        "warning": free < RECORD_WARN_FREE,
+        "estimated_seconds_left": round(max(0, free - RECORD_AUTO_STOP_FREE) / byte_rate) if byte_rate > 0 else None,
+    }
+
+
+def recording_watchdog(scan_id):
+    while True:
+        time.sleep(2)
+        active = read_active_recording()
+        if active.get("scan_id") != scan_id:
+            return
+        if not container_running(CONTAINERS["gs_bag"]) and time.time() - float(active.get("started_epoch") or 0) > 15:
+            action_fastlivo_record_stop(reason="recorder_exited")
+            return
+        if filesystem_free_bytes() <= RECORD_AUTO_STOP_FREE:
+            action_fastlivo_record_stop(reason="disk_low_auto_stop")
+            return
+
+
+def action_fastlivo_record_start():
+    with WORKFLOW_LOCK:
+        mode = active_workflow()
+        if mode != "idle":
+            return {"ok": False, "message": f"当前正在执行 {mode}，不能开始录制"}
+        free = filesystem_free_bytes()
+        if free < RECORD_MIN_START_FREE:
+            return {"ok": False, "message": f"磁盘可用空间不足15 GiB，当前 {free / GIB:.1f} GiB"}
+        ensure_dirs()
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        scan_dir = FASTLIVO_MAP_ROOT / stamp
+        scan_dir.mkdir(parents=True, exist_ok=False)
+        bag = scan_dir / f"{stamp}-gs-raw.bag"
+        update_scan_workflow(scan_dir, "recording", {
+            "status": "starting", "started_at": time.strftime("%Y-%m-%d %H:%M:%S"), "bag": str(bag),
+        })
+        action_lio_stop()
+        lidar = action_lidar_start()
+        lidar_ready = wait_for_lidar_ready() if lidar.get("ok") else {"ok": False}
+        camera = prepare_scan_camera()
+        camera_ready = wait_for_camera_ready() if camera.get("ok") and lidar_ready.get("ok") else {"ok": False}
+        if not lidar.get("ok") or not lidar_ready.get("ok") or not camera.get("ok") or not camera_ready.get("ok"):
+            action_stop_scan_runtime()
+            update_scan_workflow(scan_dir, "recording", {"status": "invalid", "error": "相机或雷达启动失败"})
+            return {"ok": False, "message": "相机或雷达未能稳定出帧", "lidar": lidar, "lidar_ready": lidar_ready, "camera": camera, "camera_ready": camera_ready}
+        inner = (
+            "rosbag record --lz4 --buffsize=1024 "
+            f"-O {shlex.quote(str(bag))} "
+            "/left_camera/image /livox/lidar /livox/imu"
+        )
+        cmd = named_ros_env_cmd("fast_livo2_gs_raw_bag_record", inner)
+        bag_res = start_process("record-data", cmd, cwd=DEPLOY_DIR)
+        active = {
+            "scan_id": stamp, "scan_dir": str(scan_dir), "bag": str(bag),
+            "started_at": time.strftime("%Y-%m-%d %H:%M:%S"), "started_epoch": time.time(),
+            "log": bag_res.get("log"),
+        }
+        write_active_recording(active)
+        update_scan_workflow(scan_dir, "recording", {"status": "recording", "log": bag_res.get("log")})
+        threading.Thread(target=recording_watchdog, args=(stamp,), daemon=True).start()
+        return {"ok": True, "scan_id": stamp, "scan_dir": str(scan_dir), "bag": str(bag), "lidar": lidar, "lidar_ready": lidar_ready, "camera": camera, "camera_ready": camera_ready}
+
+
+def action_fastlivo_record_stop(reason="operator"):
+    with WORKFLOW_LOCK:
+        active = read_active_recording()
+        if not active:
+            return {"ok": False, "message": "当前没有正在录制的数据"}
+        scan_dir = pathlib.Path(active["scan_dir"])
+        update_scan_workflow(scan_dir, "recording", {"status": "stopping", "stop_reason": reason})
+        stop_bag = docker_sigint_wait("fast_livo2_gs_raw_bag_record", timeout=45)
+        stop_devices = action_stop_scan_runtime()
+        bag_info = inspect_rosbag(active["bag"])
+        status = "valid" if stop_bag.get("ok") and bag_info.get("valid") else "invalid"
+        update_scan_workflow(scan_dir, "recording", {
+            "status": status,
+            "stopped_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "stop_reason": reason,
+            "bag_info": {key: value for key, value in bag_info.items() if key != "output"},
+            "error": "; ".join(bag_info.get("errors") or []),
+        })
+        clear_active_recording()
+        return {
+            "ok": status == "valid", "scan_id": scan_dir.name, "scan_dir": str(scan_dir),
+            "bag_info": bag_info, "stop_bag": stop_bag, "stop_devices": stop_devices,
+            "message": "录制完成，数据校验通过" if status == "valid" else "录制已停止，但数据校验未通过",
+        }
+
+
+def container_state(name):
+    res = run_cmd(["docker", "inspect", "-f", "{{.State.Status}}|{{.State.ExitCode}}", name], timeout=5, cwd=DEPLOY_DIR)
+    if not res.get("ok"):
+        return {"exists": False, "status": "missing", "exit_code": None}
+    parts = res.get("output", "").strip().split("|", 1)
+    try:
+        exit_code = int(parts[1]) if len(parts) > 1 else None
+    except ValueError:
+        exit_code = None
+    return {"exists": True, "status": parts[0], "exit_code": exit_code}
+
+
+def set_container_paused(name, paused):
+    return run_cmd(["docker", "pause" if paused else "unpause", name], timeout=8, cwd=DEPLOY_DIR)
+
+
+def stop_offline_runtime():
+    state = container_state("fast_livo2_offline_bag_play")
+    if state.get("status") == "paused":
+        set_container_paused("fast_livo2_offline_bag_play", False)
+    player = docker_sigint_wait("fast_livo2_offline_bag_play", timeout=15)
+    mapper = docker_sigint_wait("fast_livo2_mapping", timeout=90)
+    docker_rm(["fast_livo2_offline_bag_play"])
+    return {"player": player, "mapper": mapper}
+
+
+def validate_fastlivo_outputs(final_status=None):
+    raw = FASTLIVO_PCD_DIR / "all_raw_points.pcd"
+    poses = FASTLIVO_LOG_DIR / "image" / "image_poses.txt"
+    images = list((FASTLIVO_LOG_DIR / "image").glob("*.png"))
+    errors = []
+    if not raw.is_file() or raw.stat().st_size < 1024:
+        errors.append("all_raw_points.pcd缺失或为空")
+    pose_count = 0
+    if poses.is_file():
+        pose_count = sum(1 for line in poses.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip())
+    if pose_count <= 0:
+        errors.append("image_poses.txt为空")
+    if not images:
+        errors.append("没有保存训练图像")
+    dropped = int((final_status or {}).get("image_save_dropped") or 0)
+    if dropped:
+        errors.append(f"图片保存丢弃{dropped}帧")
+    return {
+        "ok": not errors, "errors": errors, "raw_pcd_size": raw.stat().st_size if raw.is_file() else 0,
+        "pose_count": pose_count, "image_count": len(images), "image_save_dropped": dropped,
+    }
+
+
+def promote_offline_outputs(scan_dir, raw_bag, logs, job_id):
+    scan_dir = pathlib.Path(scan_dir)
+    backup = scan_dir.parent / f".{scan_dir.name}-backup-{job_id}"
+    if backup.exists():
+        shutil.rmtree(backup)
+    backup.mkdir(parents=True)
+    names = ("all_raw_points.pcd", "all_downsampled_points.pcd", "lidar_poses.txt", "image_poses.txt", "images", "calib", "colmap", "metadata.json")
+    moved = []
+    try:
+        for name in names:
+            source = scan_dir / name
+            if source.exists():
+                shutil.move(str(source), str(backup / name))
+                moved.append(name)
+        saved = copy_fastlivo_outputs(scan_dir, extra_logs=logs, raw_bag=raw_bag)
+        archive = saved.get("dataset_archive") or {}
+        if saved.get("missing") or not archive.get("ok"):
+            raise RuntimeError("输出归档验证失败: " + "; ".join((saved.get("missing") or []) + (archive.get("missing") or []) + (archive.get("errors") or [])))
+        previous_metadata = read_json_file(backup / "metadata.json")
+        current_metadata = read_json_file(scan_dir / "metadata.json")
+        if previous_metadata.get("workflow"):
+            current_metadata["workflow"] = previous_metadata["workflow"]
+            atomic_write_json(scan_dir / "metadata.json", current_metadata)
+        shutil.rmtree(backup, ignore_errors=True)
+        return {"ok": True, "saved": saved}
+    except Exception as exc:
+        for name in names:
+            current = scan_dir / name
+            safe_remove_path(current, scan_dir)
+        for name in moved:
+            old = backup / name
+            if old.exists():
+                shutil.move(str(old), str(scan_dir / name))
+        shutil.rmtree(backup, ignore_errors=True)
+        return {"ok": False, "error": str(exc)}
+
+
+def offline_job_update(job, **values):
+    persisted = read_offline_job()
+    requested_status = values.get("status")
+    if persisted.get("job_id") == job.get("job_id") and persisted.get("status") == "cancel_requested" and requested_status in ("starting", "running", "draining", "saving"):
+        values["status"] = "cancel_requested"
+    job.update(values)
+    job["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    write_offline_job(job)
+    scan_dir = pathlib.Path(job["scan_dir"])
+    update_scan_workflow(scan_dir, "offline", {
+        key: value for key, value in job.items()
+        if key in ("job_id", "status", "progress", "lag", "paused", "started_at", "updated_at", "completed_at", "error", "validation")
+    })
+
+
+def offline_mapping_worker(job):
+    player_name = "fast_livo2_offline_bag_play"
+    mapper_log = None
+    player_log = None
+    paused = False
+    final_status = {}
+    try:
+        scan_dir = pathlib.Path(job["scan_dir"])
+        bag = pathlib.Path(job["bag"])
+        bag_info = job["bag_info"]
+        clear_fastlivo_log_outputs()
+        mapper_cmd = named_ros_env_cmd(
+            "fast_livo2_mapping",
+            "roslaunch jr_fastlivo_validation fast_livo2_saved_mapping.launch "
+            "rviz:=false pcd_save_en:=true pcd_save_type:=0 pcd_save_interval:=-1 pcd_filter_size:=0.15 "
+            "img_save_en:=true img_save_interval:=1 pose_output_en:=true colmap_output_en:=true",
+        )
+        mapper = start_process("fastlivo-offline", mapper_cmd, cwd=DEPLOY_DIR)
+        mapper_log = mapper.get("log")
+        offline_job_update(job, status="starting", progress=0.0, mapper_log=mapper_log)
+        deadline = time.time() + 30
+        while time.time() < deadline and "fast_livo2_mapping" not in {row["name"] for row in docker_ps()}:
+            time.sleep(1)
+        if "fast_livo2_mapping" not in {row["name"] for row in docker_ps()}:
+            raise RuntimeError("FAST-LIVO2离线容器启动失败")
+        ready_deadline = time.time() + 45
+        subscribers_ready = False
+        while time.time() < ready_deadline:
+            node_info = run_cmd(
+                docker_exec_ros_cmd("fast_livo2_mapping", "timeout 3 rosnode info /laserMapping 2>/dev/null || true"),
+                timeout=5, cwd=DEPLOY_DIR,
+            ).get("output", "")
+            bridge_info = run_cmd(
+                docker_exec_ros_cmd("fast_livo2_mapping", "timeout 3 rosnode info /livox_driver2_to_legacy 2>/dev/null || true"),
+                timeout=5, cwd=DEPLOY_DIR,
+            ).get("output", "")
+            if "/left_camera/image" in node_info and "/livox/imu" in node_info and "/livox/lidar" in bridge_info:
+                subscribers_ready = True
+                break
+            time.sleep(1)
+        if not subscribers_ready:
+            raise RuntimeError("FAST-LIVO2订阅器在45秒内未就绪")
+        docker_rm([player_name])
+        play_inner = f"rosbag play --rate 0.5 {shlex.quote(str(bag))}"
+        player_cmd = named_ros_env_cmd(player_name, play_inner, remove=False)
+        player = start_process("fastlivo-offline-play", player_cmd, cwd=DEPLOY_DIR)
+        player_log = player.get("log")
+        offline_job_update(job, status="running", player_log=player_log, paused=False)
+        deadline = time.time() + 30
+        while time.time() < deadline and not container_state(player_name).get("exists"):
+            time.sleep(0.5)
+        if not container_state(player_name).get("exists"):
+            raise RuntimeError("rosbag离线回放容器启动失败")
+        bag_start = float(bag_info.get("start") or 0)
+        bag_end = float(bag_info.get("end") or 0)
+        duration = max(0.001, bag_end - bag_start)
+        last_progress_time = time.time()
+        last_processed = -1.0
+        while True:
+            persisted = read_offline_job()
+            if persisted.get("job_id") != job["job_id"] or persisted.get("status") == "cancel_requested":
+                raise InterruptedError("operator cancelled")
+            state = container_state(player_name)
+            if state.get("status") in ("created", "restarting"):
+                time.sleep(0.5)
+                continue
+            if state.get("status") not in ("running", "paused"):
+                if state.get("exit_code") not in (0, None):
+                    raise RuntimeError(f"rosbag play退出码 {state.get('exit_code')}")
+                break
+            status = fastlivo_processing_status()
+            if status.get("ok"):
+                final_status = status
+                processed = float(status.get("last_processed") or 0)
+                progress = max(0.0, min(0.995, (processed - bag_start) / duration)) if processed > 0 else 0.0
+                if processed > last_processed + 0.01:
+                    last_processed = processed
+                    last_progress_time = time.time()
+                lag = float(status.get("lag") or 0)
+                if not paused and lag > 2.0:
+                    set_container_paused(player_name, True)
+                    paused = True
+                elif paused and lag <= 0.5:
+                    set_container_paused(player_name, False)
+                    paused = False
+                offline_job_update(job, status="running", progress=round(progress, 4), lag=round(lag, 3), paused=paused, processing=status)
+            if time.time() - last_progress_time > 180:
+                raise RuntimeError("离线建图连续180秒没有处理进展")
+            time.sleep(1)
+        docker_rm([player_name])
+        offline_job_update(job, status="draining", paused=False)
+        ready = 2 if final_status.get("ok") and float(final_status.get("lag") or 0) <= 0.5 else 0
+        drain_deadline = time.time() + max(600, float(bag_info.get("duration") or 0) * 8)
+        while ready < 2 and time.time() < drain_deadline:
+            persisted = read_offline_job()
+            if persisted.get("status") == "cancel_requested":
+                raise InterruptedError("operator cancelled")
+            status = fastlivo_processing_status()
+            if status.get("ok"):
+                final_status = status
+                lag = float(status.get("lag") or 0)
+                progress = max(0.0, min(1.0, (float(status.get("last_processed") or 0) - bag_start) / duration))
+                ready = ready + 1 if lag <= 0.5 else 0
+                offline_job_update(job, status="draining", progress=round(progress, 4), lag=round(lag, 3), processing=status)
+                if ready >= 2:
+                    break
+            time.sleep(1)
+        if ready < 2:
+            raise RuntimeError("回放结束后FAST-LIVO2积压未能排空")
+        offline_job_update(job, status="saving", progress=1.0, lag=float(final_status.get("lag") or 0))
+        stop_mapper = docker_sigint_wait("fast_livo2_mapping", timeout=180)
+        if not stop_mapper.get("ok"):
+            raise RuntimeError(stop_mapper.get("output") or "FAST-LIVO2未能正常保存")
+        validation = validate_fastlivo_outputs(final_status)
+        if not validation.get("ok"):
+            raise RuntimeError("; ".join(validation.get("errors") or []))
+        promotion = promote_offline_outputs(scan_dir, bag, [path for path in (mapper_log, player_log) if path], job["job_id"])
+        if not promotion.get("ok"):
+            raise RuntimeError(promotion.get("error") or "结果替换失败")
+        offline_job_update(
+            job, status="completed", progress=1.0, paused=False, validation=validation,
+            completed_at=time.strftime("%Y-%m-%d %H:%M:%S"), result_file="all_raw_points.pcd",
+        )
+    except InterruptedError:
+        stop_offline_runtime()
+        offline_job_update(job, status="cancelled", paused=False, error="用户停止了离线建图")
+    except Exception as exc:
+        stop_offline_runtime()
+        offline_job_update(job, status="failed", paused=False, error=str(exc))
+
+
+def action_fastlivo_offline_start(scan_id):
+    with WORKFLOW_LOCK:
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", scan_id or ""):
+            return {"ok": False, "message": "扫描ID不合法"}
+        if active_workflow() != "idle":
+            return {"ok": False, "message": f"当前正在执行 {active_workflow()}，不能开始离线建图"}
+        scan_dir = (FASTLIVO_MAP_ROOT / scan_id).resolve()
+        if scan_dir.parent != FASTLIVO_MAP_ROOT.resolve() or not scan_dir.is_dir():
+            return {"ok": False, "message": "扫描记录不存在"}
+        bag = find_scan_bag(scan_dir)
+        if not bag:
+            return {"ok": False, "message": "扫描记录缺少原始bag"}
+        bag_info = inspect_rosbag(bag)
+        if not bag_info.get("valid"):
+            return {"ok": False, "message": "原始bag校验未通过", "bag_info": bag_info}
+        update_scan_workflow(scan_dir, "recording", {
+            "status": "valid",
+            "bag": str(bag),
+            "bag_info": {key: value for key, value in bag_info.items() if key != "output"},
+        })
+        required_free = max(10 * GIB, int(bag.stat().st_size * 0.5))
+        if filesystem_free_bytes() < required_free:
+            return {"ok": False, "message": f"离线建图空间不足，需要至少 {required_free / GIB:.1f} GiB"}
+        job = {
+            "job_id": uuid.uuid4().hex[:12], "scan_id": scan_id, "scan_dir": str(scan_dir), "bag": str(bag),
+            "bag_info": {key: value for key, value in bag_info.items() if key != "output"},
+            "status": "starting", "progress": 0.0, "paused": False,
+            "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        write_offline_job(job)
+        update_scan_workflow(scan_dir, "offline", {"job_id": job["job_id"], "status": "starting", "progress": 0.0, "started_at": job["started_at"]})
+        threading.Thread(target=offline_mapping_worker, args=(job,), daemon=True).start()
+        return {"ok": True, "job": job}
+
+
+def action_fastlivo_offline_cancel():
+    with WORKFLOW_LOCK:
+        job = read_offline_job()
+        if job.get("status") not in ("starting", "running", "draining", "saving"):
+            return {"ok": False, "message": "当前没有可停止的离线建图任务", "job": job}
+        job["status"] = "cancel_requested"
+        write_offline_job(job)
+        update_scan_workflow(job["scan_dir"], "offline", {"status": "cancel_requested"})
+        return {"ok": True, "message": "已请求停止离线建图", "job": job}
+
+
 def action_fastlivo_start():
     running = container_running(CONTAINERS["fusion"])
     if running:
@@ -1163,6 +1895,8 @@ def action_fastlivo_start():
 
 
 def action_fastlivo_stop():
+    if active_workflow() == "offline_mapping":
+        return {"ok": False, "message": "当前是离线建图任务，请使用停止离线建图"}
     active = read_active_fastlivo_scan()
     if not container_running(CONTAINERS["fusion"]) and not active:
         runtime_stop = action_stop_scan_runtime()
@@ -1173,8 +1907,9 @@ def action_fastlivo_stop():
             "output": "FAST-LIVO2 mapping is not running; runtime stop commands were sent.\n" + runtime_stop.get("output", ""),
         }
     scan_dir = active.get("scan_dir") or str(FASTLIVO_MAP_ROOT / time.strftime("%Y%m%d-%H%M%S"))
-    stop_res = docker_sigint_wait("fast_livo2_mapping", timeout=90)
     raw_bag_stop = docker_sigint_wait("fast_livo2_gs_raw_bag_record", timeout=35)
+    catch_up = wait_fastlivo_catch_up(max_wait=30, target_lag=0.5)
+    stop_res = docker_sigint_wait("fast_livo2_mapping", timeout=90)
     time.sleep(2)
     extra_logs = [p for p in (active.get("log"), active.get("raw_bag_log")) if p]
     saved = copy_fastlivo_outputs(scan_dir, extra_logs=extra_logs, raw_bag=active.get("raw_bag"))
@@ -1188,6 +1923,8 @@ def action_fastlivo_stop():
         *saved.get("copied", []),
         "raw_bag_stop:",
         raw_bag_stop.get("output", ""),
+        "processing catch-up:",
+        catch_up.get("output", ""),
         "gs_livo_export:",
         json.dumps(saved.get("gs_livo_export", {}), ensure_ascii=False)[:2000],
         "runtime stop:",
@@ -1200,6 +1937,7 @@ def action_fastlivo_stop():
         "scan_dir": scan_dir,
         "stop_mapping": stop_res,
         "stop_raw_bag": raw_bag_stop,
+        "processing_catch_up": catch_up,
         "save": saved,
         "stop_runtime": runtime_stop,
         "output": "\n".join(str(x) for x in output if x),
@@ -1207,30 +1945,32 @@ def action_fastlivo_stop():
 
 
 def action_fastlivo_start_all():
+    mode = active_workflow()
+    if mode not in ("idle", "realtime_mapping"):
+        return {"ok": False, "message": f"当前正在执行 {mode}，不能开始实时建图"}
     lio_stop = action_lio_stop()
     lidar = action_lidar_start()
-    time.sleep(1)
-    mapping_camera = camera_config_status()["params"]
-    mapping_camera.update({
-        "ExposureAutoString": "Once",
-        "AutoExposureTimeLowerLimit": 100,
-        "AutoExposureTimeUpperLimit": 10000,
-        "GainAuto": 0,
-    })
-    mapping_camera, _ = normalize_camera_params(mapping_camera)
-    write_camera_config_yaml(CAMERA_CONFIG_PATH, mapping_camera)
-    # A hardware Once cycle starts only when the camera process starts. Restart
-    # even if an operator left the debug camera running before beginning a scan.
-    camera_stop = action_camera_stop()
-    camera = action_camera_start()
-    time.sleep(1)
+    lidar_ready = wait_for_lidar_ready() if lidar.get("ok") else {"ok": False}
+    camera_result = prepare_scan_camera()
+    camera_stop = camera_result.get("stop")
+    camera = camera_result.get("start")
+    camera_ready = wait_for_camera_ready() if camera_result.get("ok") and lidar_ready.get("ok") else {"ok": False}
+    if not lidar_ready.get("ok") or not camera_ready.get("ok"):
+        action_stop_scan_runtime()
+        return {
+            "ok": False, "message": "相机或雷达未能稳定出帧，实时建图未启动",
+            "lio_stop": lio_stop, "lidar": lidar, "lidar_ready": lidar_ready,
+            "camera_stop": camera_stop, "camera": camera, "camera_ready": camera_ready,
+        }
     mapping = action_fastlivo_start()
     return {
         "ok": bool(lidar.get("ok") and camera.get("ok") and mapping.get("ok")),
         "lio_stop": lio_stop,
         "lidar": lidar,
+        "lidar_ready": lidar_ready,
         "camera_stop": camera_stop,
         "camera": camera,
+        "camera_ready": camera_ready,
         "mapping": mapping,
         "scan_dir": mapping.get("scan_dir"),
     }
@@ -1259,6 +1999,13 @@ def action_lio_start_all():
 
 
 def action_stop_all():
+    mode = active_workflow()
+    if mode == "recording":
+        stopped = action_fastlivo_record_stop(reason="stop_all")
+        return {"ok": bool(stopped.get("ok")), "stop_recording": stopped, "output": stopped.get("message", "")}
+    if mode == "offline_mapping":
+        cancel = action_fastlivo_offline_cancel()
+        return {"ok": bool(cancel.get("ok")), "cancel_offline": cancel, "output": cancel.get("message", "")}
     fastlivo_save = None
     if container_running(CONTAINERS["fusion"]):
         fastlivo_save = action_fastlivo_stop()
@@ -1480,17 +2227,20 @@ async def stream_points(writer, mode, quality):
                 proc.kill()
 
 
-async def stream_camera(writer, quality):
+async def stream_camera(writer, quality, profile="default"):
     ensure_dirs()
     safe_quality = quality if quality in ("mini", "pc") else "mini"
     # The native camera stream is 2448x2048. Downscale only the browser preview
     # to control JPEG/WebSocket load; ROS mapping and saved images stay native.
-    width = "1280"
-    hz = "5" if safe_quality == "mini" else "8"
-    jpeg_quality = "78" if safe_quality == "mini" else "84"
+    if profile == "recording":
+        width, hz, jpeg_quality = "960", "8", "75"
+    else:
+        width = "1280"
+        hz = "5" if safe_quality == "mini" else "8"
+        jpeg_quality = "78" if safe_quality == "mini" else "84"
     inner = (
         "python3 /home/jr/fast_livo2_data/tools/ros_image_stream.py "
-        f"--topics /rgb_img,/left_camera/image --hz {hz} --width {width} --quality {jpeg_quality}"
+        f"--topics /left_camera/image,/rgb_img --hz {hz} --width {width} --quality {jpeg_quality}"
     )
     current = {row["name"] for row in docker_ps()}
     if not any(name in current for name in CONTAINERS["camera"]):
@@ -1569,8 +2319,9 @@ async def handle_websocket(reader, writer, path, headers, kind):
     params = urllib.parse.parse_qs(query)
     mode = params.get("mode", ["lidar"])[0]
     quality = params.get("quality", ["mini"])[0]
+    profile = params.get("profile", ["default"])[0]
     if kind == "camera":
-        await stream_camera(writer, quality)
+        await stream_camera(writer, quality, profile)
     else:
         await stream_points(writer, mode, quality)
 
@@ -1635,6 +2386,10 @@ async def handle_http(reader, writer):
             json_response(writer, api_status())
         elif clean_path == "/api/fastlivo/maps" and method == "GET":
             json_response(writer, list_fastlivo_maps())
+        elif clean_path == "/api/fastlivo/scans" and method == "GET":
+            json_response(writer, list_fastlivo_scans())
+        elif clean_path == "/api/fastlivo/offline/status" and method == "GET":
+            json_response(writer, {"ok": True, "job": read_offline_job()})
         elif clean_path.startswith("/api/fastlivo/maps/") and method == "GET":
             fastlivo_map_file_response(writer, clean_path)
         elif clean_path == "/api/gs/datasets" and method == "GET":
@@ -1676,6 +2431,15 @@ async def handle_http(reader, writer):
             json_response(writer, action_fastlivo_stop())
         elif method == "POST" and clean_path == "/api/fastlivo/start_all":
             json_response(writer, action_fastlivo_start_all())
+        elif method == "POST" and clean_path == "/api/fastlivo/record/start":
+            json_response(writer, action_fastlivo_record_start())
+        elif method == "POST" and clean_path == "/api/fastlivo/record/stop":
+            json_response(writer, action_fastlivo_record_stop())
+        elif method == "POST" and clean_path == "/api/fastlivo/offline/start":
+            payload = parse_json_body() or {}
+            json_response(writer, action_fastlivo_offline_start(str(payload.get("scan_id") or "")))
+        elif method == "POST" and clean_path == "/api/fastlivo/offline/cancel":
+            json_response(writer, action_fastlivo_offline_cancel())
         elif method == "POST" and clean_path == "/api/lio/start":
             json_response(writer, action_lio_start())
         elif method == "POST" and clean_path == "/api/lio/stop":
@@ -1702,6 +2466,21 @@ async def handle_http(reader, writer):
 
 async def main():
     ensure_dirs()
+    job = read_offline_job()
+    if job.get("status") in ("starting", "running", "draining", "saving", "cancel_requested"):
+        job.update({
+            "status": "failed",
+            "error": "控制台服务重启，离线任务已安全中断，可重新执行",
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        write_offline_job(job)
+        if job.get("scan_dir"):
+            update_scan_workflow(job["scan_dir"], "offline", {"status": "failed", "error": job["error"], "updated_at": job["updated_at"]})
+        threading.Thread(target=stop_offline_runtime, daemon=True).start()
+    elif container_running(CONTAINERS["offline_play"]):
+        threading.Thread(target=stop_offline_runtime, daemon=True).start()
+    if read_active_recording():
+        threading.Thread(target=action_fastlivo_record_stop, kwargs={"reason": "service_restarted"}, daemon=True).start()
     server = await asyncio.start_server(handle_http, HOST, PORT)
     print(f"JR scanner console listening on http://{HOST}:{PORT}", flush=True)
     async with server:

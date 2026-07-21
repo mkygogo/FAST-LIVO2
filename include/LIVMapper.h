@@ -19,7 +19,11 @@ which is included as part of this source code package.
 #include <cv_bridge/cv_bridge.h>
 #include <image_transport/image_transport.h>
 #include <nav_msgs/Path.h>
+#include <std_msgs/Float64.h>
+#include <std_msgs/Float64MultiArray.h>
 #include <vikit/camera_loader.h>
+#include <condition_variable>
+#include <thread>
 
 class LIVMapper
 {
@@ -36,6 +40,10 @@ public:
   void handleVIO();
   void handleLIO();
   void savePCD();
+  void startImageSaver();
+  void stopImageSaver();
+  void imageSaveWorker();
+  void enqueueImageSave(const std::string &path, const cv::Mat &image, const std::string &pose_line);
   void processImu();
   
   bool sync_packages(LidarMeasureGroup &meas);
@@ -86,6 +94,7 @@ public:
 
   bool lidar_map_inited = false, pcd_save_en = false, img_save_en = false, pub_effect_point_en = false, pose_output_en = false, ros_driver_fix_en = false, hilti_en = false;
   int img_save_interval = 1, pcd_save_interval = -1, pcd_save_type = 0;
+  int img_save_max_queue = 120, img_save_png_compression = 1;
   int pub_scan_num = 1;
 
   StatesGroup imu_propagate, latest_ekf_state;
@@ -94,6 +103,7 @@ public:
   deque<sensor_msgs::Imu> prop_imu_buffer;
   sensor_msgs::Imu newest_imu;
   double latest_ekf_time;
+  double last_processed_sensor_time = -1.0;
   nav_msgs::Odometry imu_prop_odom;
   ros::Publisher pubImuPropOdom;
   double imu_time_offset = 0.0;
@@ -141,6 +151,19 @@ public:
 
   ofstream fout_pre, fout_out, fout_visual_pos, fout_lidar_pos, fout_points;
 
+  struct ImageSaveTask
+  {
+    std::string path;
+    cv::Mat image;
+    std::string pose_line;
+  };
+  std::mutex image_save_mutex;
+  std::condition_variable image_save_cv;
+  std::deque<ImageSaveTask> image_save_queue;
+  std::thread image_save_thread;
+  bool image_save_stopping = false;
+  size_t image_save_written = 0, image_save_dropped = 0;
+
   pcl::VoxelGrid<PointType> downSizeFilterSurf;
 
   V3D euler_cur;
@@ -171,6 +194,8 @@ public:
   ros::Publisher pubLaserCloudMap;
   ros::Publisher pubOdomAftMapped;
   ros::Publisher pubPath;
+  ros::Publisher pubProcessingLag;
+  ros::Publisher pubProcessingStatus;
   ros::Publisher pubLaserCloudDyn;
   ros::Publisher pubLaserCloudDynRmed;
   ros::Publisher pubLaserCloudDynDbg;
