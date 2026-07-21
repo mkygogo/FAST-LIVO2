@@ -7,6 +7,7 @@ let cameraReconnectTimer = null;
 let cameraExposureMode = "Off";
 let cameraExposureLast = null;
 let cameraExposureStableFrames = 0;
+let cameraConfigParams = {};
 let scanState = "idle";
 let sceneMode = "live";
 let qualityMode = localStorage.getItem("jr.preview.quality") || "mini";
@@ -232,15 +233,19 @@ function setCameraConfigDirty(dirty) {
 
 function readCameraFormParams() {
   return {
+    width: Number(cameraConfigParams.width || 2448),
+    height: Number(cameraConfigParams.height || 2048),
+    Offset_x: Number(cameraConfigParams.Offset_x || 0),
+    Offset_y: Number(cameraConfigParams.Offset_y || 0),
     ExposureTime: Number($("camExposure")?.value || 6000),
     ExposureAutoString: cameraExposureMode,
     AutoExposureTimeLowerLimit: 100,
     AutoExposureTimeUpperLimit: 10000,
     AutoExposureAOIUsageIntensity: true,
-    AutoExposureAOIWidth: 960,
-    AutoExposureAOIHeight: 768,
-    AutoExposureAOIOffsetX: 160,
-    AutoExposureAOIOffsetY: 128,
+    AutoExposureAOIWidth: Number(cameraConfigParams.AutoExposureAOIWidth || 1840),
+    AutoExposureAOIHeight: Number(cameraConfigParams.AutoExposureAOIHeight || 1536),
+    AutoExposureAOIOffsetX: Number(cameraConfigParams.AutoExposureAOIOffsetX || 304),
+    AutoExposureAOIOffsetY: Number(cameraConfigParams.AutoExposureAOIOffsetY || 256),
     GainAuto: cameraExposureMode === "Off" ? Number($("camGainAuto")?.value || 0) : 0,
     FrameRate: Number($("camFrameRate")?.value || 10),
     FrameRateEnable: Boolean($("camFrameRateEnable")?.checked),
@@ -253,6 +258,7 @@ function readCameraFormParams() {
 }
 
 function fillCameraForm(params = {}) {
+  cameraConfigParams = {...cameraConfigParams, ...params};
   const setVal = (id, value) => {
     const el = $(id);
     if (!el || value == null) return;

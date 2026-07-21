@@ -124,6 +124,9 @@ No systemd restart for shell-only changes. Does not auto-start LiDAR/mapping.
 ## Hardware and Network Assumptions
 
 - LiDAR: Livox Mid360
+- Camera: Hikrobot `MV-CS050-10UC`, serial `DB1947043`
+- Camera sensor/output: Sony IMX264 color, native `2448×2048`, USB3
+- Lens: Hikrobot `MVL-MF0824M-5MPE`, fixed 8 mm, manual F2.4–F16 iris/focus
 - LiDAR IP: `192.168.1.151`
 - Mini PC LiDAR NIC: `enp1s0`
 - Mini PC LiDAR NIC address: `192.168.1.5/24`
@@ -201,7 +204,7 @@ Keep the UI model simple for the touch-screen operator:
 
 ## Hikrobot Automatic Exposure
 
-The `MV-CA013-A0UC` camera supports hardware exposure modes `Off`, `Once`, and
+The `MV-CS050-10UC` camera supports hardware exposure modes `Off`, `Once`, and
 `Continuous`. The touch console exposes all three under `相机调试`; changing the
 mode rewrites the camera YAML and restarts only the camera container (about two
 seconds). Manual indoor/outdoor/bright presets always switch exposure back to
@@ -213,7 +216,7 @@ camera. Default hardware-auto settings are:
 ```text
 AutoExposureTimeLowerLimit: 100 us
 AutoExposureTimeUpperLimit: 10000 us
-AutoFunctionAOI: 960x768 +160+128 (center of the 1280x1024 image)
+AutoFunctionAOI: 1840x1536 +304+256 (center of the 2448x2048 image)
 GainAuto: Off
 ```
 
@@ -229,11 +232,17 @@ fast_livo2_console/patches/hikrobot_camera_auto_exposure.patch
 ```
 
 Apply this after the existing Hikrobot trigger/timestamp integration in
-`~/fast_livo2_ws/src/HIKROBOT-MVS-CAMERA-ROS`. On this USB camera,
+`~/fast_livo2_ws/src/HIKROBOT-MVS-CAMERA-ROS`. On the previous USB camera,
 `MV_FRAME_OUT_INFO_EX.fExposureTime` is always zero; the driver must query the
 `ExposureTime` node and publish that value in `/hikrobot_camera/frame_info`.
 `ros_image_stream.py` attaches the latest value to `/ws/camera` image messages
 as `exposure_us`.
+
+The camera/lens pair was replaced in July 2026. The old `1280×1024` intrinsic
+file belongs to `MV-CA013-A0UC` and must not be treated as calibrated data for
+the new camera. Before production FAST-LIVO2 scans, calibrate the new
+`MV-CS050-10UC` + 8 mm lens at `2448×2048`, update
+`FAST-LIVO2/config/camera_pinhole.yaml`, then redo/verify LiDAR-camera extrinsics.
 
 Official FAST-LIVO2 saved maps are copied into:
 

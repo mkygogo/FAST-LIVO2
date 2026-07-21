@@ -31,10 +31,10 @@
 +        node.param("AutoExposureTimeLowerLimit", AutoExposureTimeLowerLimit, (float)100.0);
 +        node.param("AutoExposureTimeUpperLimit", AutoExposureTimeUpperLimit, (float)10000.0);
 +        node.param("AutoExposureAOIUsageIntensity", AutoExposureAOIUsageIntensity, true);
-+        node.param("AutoExposureAOIWidth", AutoExposureAOIWidth, 960);
-+        node.param("AutoExposureAOIHeight", AutoExposureAOIHeight, 768);
-+        node.param("AutoExposureAOIOffsetX", AutoExposureAOIOffsetX, 160);
-+        node.param("AutoExposureAOIOffsetY", AutoExposureAOIOffsetY, 128);
++        node.param("AutoExposureAOIWidth", AutoExposureAOIWidth, 1840);
++        node.param("AutoExposureAOIHeight", AutoExposureAOIHeight, 1536);
++        node.param("AutoExposureAOIOffsetX", AutoExposureAOIOffsetX, 304);
++        node.param("AutoExposureAOIOffsetY", AutoExposureAOIOffsetY, 256);
          node.param("GammaEnable", GammaEnable, false);
          node.param("Gamma", Gamma, (float)0.7);
          node.param("GainAuto", GainAuto, 2);

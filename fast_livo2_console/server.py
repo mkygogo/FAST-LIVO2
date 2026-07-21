@@ -780,8 +780,8 @@ CAMERA_CONFIG_PATH = (
 
 # Fields the touch UI may edit. Driver applies these only at process start.
 CAMERA_CONFIG_DEFAULTS = {
-    "width": 1280,
-    "height": 1024,
+    "width": 2448,
+    "height": 2048,
     "Offset_x": 0,
     "Offset_y": 0,
     "FrameRateEnable": True,
@@ -791,10 +791,10 @@ CAMERA_CONFIG_DEFAULTS = {
     "AutoExposureTimeLowerLimit": 100,
     "AutoExposureTimeUpperLimit": 10000,
     "AutoExposureAOIUsageIntensity": True,
-    "AutoExposureAOIWidth": 960,
-    "AutoExposureAOIHeight": 768,
-    "AutoExposureAOIOffsetX": 160,
-    "AutoExposureAOIOffsetY": 128,
+    "AutoExposureAOIWidth": 1840,
+    "AutoExposureAOIHeight": 1536,
+    "AutoExposureAOIOffsetX": 304,
+    "AutoExposureAOIOffsetY": 256,
     "GammaEnable": True,
     "Gamma": 0.7,
     "GainAuto": 2,
@@ -982,7 +982,7 @@ def normalize_camera_params(raw):
         errors.append("ExposureAutoString: expected Off, Once or Continuous")
         mode = "Off"
 
-    lower = as_int("AutoExposureTimeLowerLimit", base["AutoExposureTimeLowerLimit"], 9, 10000)
+    lower = as_int("AutoExposureTimeLowerLimit", base["AutoExposureTimeLowerLimit"], 15, 10000)
     upper = as_int("AutoExposureTimeUpperLimit", base["AutoExposureTimeUpperLimit"], 10, 10000)
     if upper <= lower:
         errors.append("AutoExposureTimeUpperLimit: must be greater than lower limit")
@@ -1051,7 +1051,7 @@ def camera_config_status():
         "limits": {
             "ExposureTime": {"min": 50, "max": 100000, "unit": "us"},
             "ExposureAutoString": {"values": ["Off", "Once", "Continuous"]},
-            "AutoExposureTime": {"min": 9, "max": 10000, "unit": "us"},
+            "AutoExposureTime": {"min": 15, "max": 10000, "unit": "us"},
             "FrameRate": {"min": 1, "max": 60},
             "Gamma": {"min": 0.1, "max": 4.0},
             "GainAuto": {"values": {"0": "Off", "1": "Once", "2": "Continuous"}},
@@ -1483,8 +1483,8 @@ async def stream_points(writer, mode, quality):
 async def stream_camera(writer, quality):
     ensure_dirs()
     safe_quality = quality if quality in ("mini", "pc") else "mini"
-    # Hikrobot publishes 1280x1024. Preserve the source resolution for the
-    # touch console; quality mode only changes preview frame rate/JPEG quality.
+    # The native camera stream is 2448x2048. Downscale only the browser preview
+    # to control JPEG/WebSocket load; ROS mapping and saved images stay native.
     width = "1280"
     hz = "5" if safe_quality == "mini" else "8"
     jpeg_quality = "78" if safe_quality == "mini" else "84"
