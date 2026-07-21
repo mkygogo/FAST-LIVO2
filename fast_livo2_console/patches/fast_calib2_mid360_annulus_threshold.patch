@@ -1,0 +1,13 @@
+diff --git a/src/lidar_detect.hpp b/src/lidar_detect.hpp
+--- a/src/lidar_detect.hpp
++++ b/src/lidar_detect.hpp
+@@ -377,0 +378,6 @@
++            else if (high_quantile >= foreground_low && threshold > high_quantile)
++            {
++                ROS_WARN("[LiDAR] %s threshold %.3f exceeds stable foreground range; fallback to %.3f.",
++                         label.c_str(), threshold, std::max(otsu_threshold, foreground_low));
++                threshold = std::max(otsu_threshold, foreground_low);
++            }
+@@ -381 +387 @@
+-        if (threshold > high_quantile * 1.5f)
++        if (threshold > high_quantile * 1.8f)

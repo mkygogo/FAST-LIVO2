@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=FAST-Calib2雷达相机标定
+Comment=录制并运行JR扫描仪雷达—相机外参标定
+Exec=/home/jr/fast_livo2_deploy/console/scripts/start_fast_calib2_desktop.sh
+Icon=camera-photo
+Terminal=false
+Categories=Development;Science;
+StartupNotify=true

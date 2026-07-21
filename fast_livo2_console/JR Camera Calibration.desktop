@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=JR 相机标定
+Comment=Start the JR OpenCV camera calibration tool
+Exec=/bin/bash /home/jr/fast_livo2_deploy/console/scripts/start_jr_camera_calibration_desktop.sh
+Icon=applications-science
+Terminal=true
+Categories=Development;Science;

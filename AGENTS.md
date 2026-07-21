@@ -36,8 +36,15 @@ fast_livo2_console/
     livox_sleep.sh                  Put Mid360 into idle and disable point/IMU send
     livox_wake.sh                   Wake Mid360 for active scanning
     build_livox_power_control.sh    Build Livox SDK power-control helper
+    start_fast_calib2_desktop.sh    Touch-friendly menu for deployed FAST-Calib2 workflow
+    fast_calib2_devices.sh          Start/stop/check Mid360 + external-trigger camera
+    review_fast_calib2_result.sh    Review newest calibration result by filesystem mtime
   tools/
     livox_power_control.cpp         Livox SDK2 helper for wake/idle control
+    jr_mvs_camera_calibration.py    Direct Hikrobot MVS checkerboard capture/calibration
+    jr_usb_camera_calibration.py    Generic USB checkerboard capture/calibration
+    jr_solve_camera_calibration.py  Offline intrinsic solver for captured images
+    jr_camera_calibration_app.py    ROS Image touch-friendly calibration app
     ros_image_stream.py             ROS Image to low-FPS JPEG JSON-line bridge
     build_replay_pack.py            Build optional map trajectory replay assets
     map_viewer_server.py            Standalone HTTP server for offline PCD/PLY viewing
@@ -238,11 +245,124 @@ Apply this after the existing Hikrobot trigger/timestamp integration in
 `ros_image_stream.py` attaches the latest value to `/ws/camera` image messages
 as `exposure_us`.
 
+## Camera Intrinsic Calibration
+
+Camera intrinsic calibration code is kept in this repository under
+`fast_livo2_console/tools/`; FAST-Calib2 remains a separate ROS project for
+LiDAR-camera extrinsic calibration. For the Hikrobot industrial camera, use
+`fast_livo2_console/scripts/start_dev_mvs_camera_calibration.sh`. It talks to the
+camera through the MVS SDK and uses OpenCV checkerboard calibration. The default
+target is `11x8` inner corners with `0.025 m` squares, 40 target frames, and at
+least 25 accepted frames.
+
+Intrinsic outputs belong under:
+
+```text
+/home/jr/fast_livo2_data/calib/camera_intrinsics/
+```
+
+Do not put captured calibration images or generated reports in Git. The solver
+writes both ROS `camera_intrinsics.yaml` and FAST-Calib2
+`fast_calib2_intrinsics.yaml`. Camera intrinsics are resolution-specific: after
+changing the camera, lens, focus, aperture, ROI, binning, or output resolution,
+capture a new intrinsic dataset. In particular, old `1280x1024` results must not
+be used for the `MV-CS050-10UC` at native `2448x2048`.
+
+On the mini PC, FAST-Calib2 is deployed independently at:
+
+```text
+/home/jr/fast_livo2_ws/src/FAST-Calib2
+/home/jr/fast_livo2_data/calib/fast_calib2
+```
+
+The desktop launcher `FAST-Calib2雷达相机标定` uses a separate
+`/home/jr/fast_livo2_data/calib/fast_calib2_mv_cs050` data root for the new
+camera so that its datasets cannot be mixed with the June 2026 datasets from
+the previous camera. The launcher is backed by
+`fast_livo2_console/scripts/start_fast_calib2_desktop.sh` and calls the deployed
+record/run/review helpers. `fast_calib2_devices.sh` supplies the missing device
+preparation stage: it refuses to interrupt active mapping, stops only named
+conflicting device containers, wakes the Mid360, starts `jr_mid360_view`, starts
+the camera as `jr_hik_trig_view` with `Line0/RisingEdge`, and verifies actual
+messages on `/livox/lidar`, `/livox/imu`, and `/left_camera/image`. Its `stop`
+action removes those two calibration containers and returns the Mid360 to idle.
+The trigger config is deployed from
+`fast_livo2_console/config/hikrobot_camera_fast_calib2.yaml` and must remain at
+native `2448x2048` to match the new intrinsics. Desktop actions tee their output
+to the new data root's `logs/` directory so preflight failures remain
+diagnosable.
+
+`录制一组标定数据` must use the full-screen live preview implemented by
+`fast_livo2_console/tools/fast_calib2_record_preview.py`; do not revert it to a
+blind `rosbag record`. The 1024x600 touch layout detects ArUco DICT_6X6_250 IDs
+1/2/3/4, shows marker count, safe framing, brightness, and camera health, then
+keeps previewing during the 3-second recording. At least three expected
+markers are required; all four inside the safe border is the recommended state.
+After a successful bag, the preview remains open and displays bag size until the
+operator taps Done. The calibration trigger config uses a 30 ms auto-exposure
+ceiling because the real board scene remained underexposed at the old 10 ms
+limit; gain remains fixed.
+
+Single-scene calibration is run by `run_fast_calib2_single.sh`. Dataset names
+may contain either host-local time or container UTC time, so “latest” must be
+selected by filesystem modification time, never lexicographic directory name.
+The solver runs as a one-shot `rosrun fast_calib fast_calib` in the existing
+`jr_hik_trig_view` container with an internal 45-second timeout; do not wrap a
+long-lived `roslaunch` in `docker compose run`. A generated result is accepted
+only when four LiDAR centers were found and the rotation matrix is nonzero.
+
+Multi-scene calibration is run by `run_fast_calib2_calibration.sh --mode multi`.
+It selects exactly the latest three complete datasets by filesystem modification
+time, reverses them into chronological order, and validates each through the
+one-shot single-scene runner. It must not scan every historical directory or
+silently fall back to an older scene when one of the latest three fails. After
+three valid center records are collected, run `multi_fast_calib` directly in the
+existing `jr_hik_trig_view` container; do not use `docker compose run` plus the
+long-lived single-scene `calib.launch` for extraction.
+
+The target and scanner must remain completely static during those 3 seconds.
+A July test where the rolling target moved about 15 cm during a 12-second bag
+joined upper/lower annulus trajectories into two columns; slicing the same bag
+to its static first 3 seconds extracted four centers and produced 1.5 mm
+single-scene RMSE. Do not loosen FAST-Calib2 thresholds to compensate for motion.
+
+The Mid360 can return uneven intensities from the four reflective annuli at some
+board angles. Apply
+`fast_livo2_console/patches/fast_calib2_mid360_annulus_threshold.patch` to the
+separate FAST-Calib2 source. It only falls back from an outlier-dominated
+relative threshold when the measured p92 still belongs to the stable foreground
+range; circle cluster size, radius/residual checks, and four-center geometry
+validation remain unchanged. It also raises the coarse Auto ROI saturated-outlier
+ratio from 1.5 to 1.8: a right-oblique scene had a valid threshold ratio of 1.58,
+and lowering it from 167 to p92=106 introduced 17 background clusters; retaining
+167 found the expected four clusters and produced 2.8 mm single-scene RMSE. A
+static scene that originally lost two annuli at intensity 194 passes at the
+foreground threshold 150 with 5.2 mm RMSE, while the known 12-second moving scene
+must remain rejected.
+
+Its console-side dataset and run helpers are deployment tooling rather than
+vendored FAST-Calib2 source.
+
 The camera/lens pair was replaced in July 2026. The old `1280×1024` intrinsic
 file belongs to `MV-CA013-A0UC` and must not be treated as calibrated data for
 the new camera. Before production FAST-LIVO2 scans, calibrate the new
 `MV-CS050-10UC` + 8 mm lens at `2448×2048`, update
 `FAST-LIVO2/config/camera_pinhole.yaml`, then redo/verify LiDAR-camera extrinsics.
+
+The new camera/lens pair was calibrated on 2026-07-21 using 40 native
+`2448x2048` checkerboard images. Because the deployed vikit loader accepts only
+`k1/k2/p1/p2`, `config/camera_pinhole.yaml` uses a compatible solve with `k3`
+fixed to zero (RMS `0.115039 px`). The LiDAR-camera extrinsic was then solved
+from the latest three static FAST-Calib2 scenes (front, left-oblique,
+right-oblique). The accepted multi-scene result is under
+`fast_livo2_data/calib/fast_calib2_mv_cs050/results/20260721-143813-multi`, with
+joint RMSE 0.0101 m. Its `Rcl/Pcl` values are deployed in
+`FAST-LIVO2/config/mid360.yaml`; `camera_pinhole.yaml` remains the intrinsic-only
+camera configuration. Recalibrate after moving the camera, lens, or Mid360 mount.
+Keep `scale: 0.5`; FAST-LIVO2 therefore processes `1224x1024` images while the
+driver and calibration remain native `2448x2048`. Do not replace these values
+with the five-coefficient ROS YAML without first extending and rebuilding the
+vikit camera loader.
 
 Official FAST-LIVO2 saved maps are copied into:
 

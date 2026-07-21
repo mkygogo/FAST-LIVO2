@@ -1,12 +1,16 @@
 cam_model: Pinhole
-cam_width: 1280
-cam_height: 1024
+# MV-CS050-10UC + MVL-MF0824M-5MPE (8 mm), calibrated 2026-07-21.
+# OpenCV 11x8 checkerboard, 25 mm squares, 40 images at native resolution.
+# vikit reads k1/k2/p1/p2 only, so these values come from a k3-fixed solve
+# (RMS reprojection error: 0.115039 px).
+cam_width: 2448
+cam_height: 2048
 scale: 0.5
-cam_fx: 1293.56944
-cam_fy: 1293.3155
-cam_cx: 626.91359
-cam_cy: 522.799224
-cam_d0: -0.076160
-cam_d1: 0.123001
-cam_d2: -0.00113
-cam_d3: 0.000251
+cam_fx: 2344.386497985821
+cam_fy: 2343.7486407602405
+cam_cx: 1209.4807143640232
+cam_cy: 1030.6341695757853
+cam_d0: -0.059270521454163956
+cam_d1: 0.07385046996302265
+cam_d2: 0.00005726197659490323
+cam_d3: -0.00006359031592993574

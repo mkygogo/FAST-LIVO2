@@ -1,0 +1,33 @@
+# MV-CS050-10UC external-trigger configuration for FAST-Calib2.
+# Keep image dimensions aligned with the 2026-07-21 intrinsic calibration.
+width: 2448
+height: 2048
+Offset_x: 0
+Offset_y: 0
+
+FrameRateEnable: false
+FrameRate: 10
+
+ExposureTime: 6000
+ExposureAutoString: Once
+AutoExposureTimeLowerLimit: 100
+# The calibration board was underexposed at the old 10 ms ceiling. 30 ms is
+# still comfortably below the 100 ms Mid360-trigger period while keeping gain
+# fixed and preserving image quality for ArUco detection.
+AutoExposureTimeUpperLimit: 30000
+AutoExposureAOIUsageIntensity: true
+AutoExposureAOIWidth: 1840
+AutoExposureAOIHeight: 1536
+AutoExposureAOIOffsetX: 304
+AutoExposureAOIOffsetY: 256
+
+GammaEnable: true
+Gamma: 0.7
+GainAuto: 0
+SaturationEnable: false
+Saturation: 128
+
+TriggerModeString: "On"
+TriggerSourceString: "Line0"
+TriggerActivationString: "RisingEdge"
+LineSelectorString: "Line0"
