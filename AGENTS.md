@@ -308,10 +308,13 @@ Its authoritative source repository is:
 git@github.com:mkygogo/JR-FAST-Calib2.git
 ```
 
-The deployed source directory is a checkout of that repository. It carries
-`origin` for the JR fork and `upstream` for `hku-mars/FAST-Calib`; preserve both
-remotes when updating it. Detector source, target artwork, portable defaults,
-and project-specific maintenance guidance are kept in that repository. Runtime
+The complete Git working copy is maintained on the `38` development workstation
+at `/home/jr/JR-FAST-Calib2`. It carries `origin` for the JR fork and `upstream`
+for `hku-mars/FAST-Calib`; preserve both remotes when updating it. Deploy to the
+mini PC with `.git`, `calib_data`, and `output` excluded. The mini PC source
+directory is intentionally a plain source snapshot and must not be initialized
+as a Git repository. Detector source, target artwork, portable defaults, and
+project-specific maintenance guidance are kept in `JR-FAST-Calib2`. Runtime
 datasets, bags, point clouds, logs, and generated calibration results remain
 outside Git under `/home/jr/fast_livo2_data/calib/`.
 
