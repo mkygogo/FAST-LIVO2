@@ -153,6 +153,10 @@ hikrobot_camera           Hikrobot camera ROS driver
 jr_lidar_mapping          FAST_LIO LiDAR-only mapping
 fast_livo2_mapping        FAST-LIVO2 camera+LiDAR mapping with official PCD save
 fast_livo2_bag_record     Bag recording
+fast_livo2_gs_raw_bag_record
+                          Full camera+LiDAR+IMU scan recording
+fast_livo2_offline_bag_play
+                          Rate-controlled rosbag playback for offline mapping
 ```
 
 `server.py` only calls whitelisted scripts/actions. Do not add an endpoint that
@@ -201,6 +205,10 @@ Keep the UI model simple for the touch-screen operator:
   `/left_camera/image`, `/livox/lidar`, and `/livox/imu`; it must not start
   FAST-LIVO2. The video preview is low latency and the 3D preview replaces each
   batch with the latest raw LiDAR frame instead of accumulating unregistered data.
+- New recordings are written directly under
+  `fast_livo2_maps/<timestamp>/<timestamp>-gs-raw.bag` with a 1 GiB rosbag
+  buffer. Warn below 30 GiB free, refuse to start below 15 GiB, and gracefully
+  auto-stop below 8 GiB so the bag index can still be finalized.
 - Recording, real-time mapping, and offline mapping are mutually exclusive.
   A recording is eligible for offline mapping only after SIGINT-finalized bag
   indexing and required-topic/rate validation succeed. Raw bags are retained.
@@ -210,9 +218,12 @@ Keep the UI model simple for the touch-screen operator:
 - `数据管理` lists scan records under `fast_livo2_maps/<timestamp>/` (left list,
   right detail). **打开预览** reuses `loadMapFile()` and switches back to the
   `实时建图` page (prefer `all_raw_points.pcd`, fallback downsampled). It also
-  starts/retries offline mapping for records containing a valid raw bag. API:
-  `GET /api/fastlivo/scans`, offline start/status/cancel endpoints, plus the
-  existing map file endpoints.
+  starts/retries offline mapping for records containing a valid raw bag.
+  **删除数据** is an explicit, confirmed, irreversible operator action that
+  removes the complete scan directory and its matching GS export; there is no
+  automatic deletion or retention cleanup. API: `GET /api/fastlivo/scans`,
+  `POST /api/fastlivo/scans/delete`, offline start/status/cancel endpoints, plus
+  the existing map file endpoints.
 - `设备概览` shows host/memory/network status plus **磁盘与数据**: whole-disk
   total/used/free, `fast_livo2_maps` size + scan count, and `bags` size + bag
   count. `/api/status` includes a `storage` object (dir sizes cached ~30s).
@@ -231,11 +242,14 @@ seconds). Manual indoor/outdoor/bright presets always switch exposure back to
 `Off`.
 
 Both `开始实时建图` and `开始录制` write `ExposureAutoString: Once` before
-starting the camera. Default hardware-auto settings are:
+starting the camera while preserving the configured auto-exposure ceiling. The
+touch UI offers 10/20/30/40/50 ms ceiling choices; indoor scanning commonly
+needs 20–30 ms, while longer exposure increases motion blur. The configuration
+default remains:
 
 ```text
 AutoExposureTimeLowerLimit: 100 us
-AutoExposureTimeUpperLimit: 10000 us
+AutoExposureTimeUpperLimit: 10000 us (10 ms; operator-selectable up to 50000 us)
 AutoFunctionAOI: 1840x1536 +304+256 (center of the 2448x2048 image)
 GainAuto: Off
 ```
@@ -436,7 +450,7 @@ current scan coverage visible without opening RViz.
 Current behavior:
 
 - The preview page shows camera video and a Three.js cumulative 3D map together.
-- The production `建图` page shows camera video and a Three.js 3D map together;
+- The production `实时建图` page shows camera video and a Three.js 3D map together;
   there is no separate primary preview page.
 - The live map defaults to FPS follow mode using `/aft_mapped_to_init`, with
   `/path` as a fallback for heading/position context. Fullscreen mode exposes
@@ -488,7 +502,15 @@ Mapping output topics:
 /cloud_registered
 /path
 /aft_mapped_to_init
+/fast_livo2/processing_lag
+/fast_livo2/processing_status
 ```
+
+`/fast_livo2/processing_status` publishes received/processed timestamps, lag,
+LiDAR/image/IMU buffer sizes, image-save queue depth, images written, and images
+dropped. Offline playback uses this status to pause above 2 seconds of lag,
+resume below 0.5 seconds, drain queues after playback, and reject any result
+with dropped images.
 
 `ros_point_stream.py` intentionally down-samples point clouds before they reach
 the browser and should preserve RGB fields when available. Do not log or persist
@@ -605,6 +627,7 @@ Primary recorded data on the mini PC:
 
 ```text
 /home/jr/fast_livo2_data/output/fast_livo2_maps/<YYYYMMDD-HHMMSS>/
+  <YYYYMMDD-HHMMSS>-gs-raw.bag    Complete camera/LiDAR/IMU source recording
   all_raw_points.pcd
   all_downsampled_points.pcd
   image_poses.txt
@@ -618,8 +641,8 @@ Primary recorded data on the mini PC:
   mid360-<timestamp>.bag     # console bag-record page
 ```
 
-Console UI surfaces these under `数据管理` (maps only) and `设备概览` disk
-panel (maps + bags sizes).
+Console UI surfaces complete scan records under `数据管理` and reports both scan
+directories and debug bags in the `设备概览` disk panel.
 
 The exporter also keeps a complete working dataset under
 `output/gs_livo_datasets/<scan_id>/`. After export, `server.py` must mirror the

@@ -289,19 +289,26 @@ function fillCameraForm(params = {}) {
   setVal("camExposure", params.ExposureTime);
   if (params.AutoExposureTimeUpperLimit != null) {
     const autoLimit = $("camAutoExposureMax");
-    const autoLimitMs = Number(params.AutoExposureTimeUpperLimit) / 1000;
-    if (autoLimit) {
-      autoLimit.querySelector("[data-current-value]")?.remove();
-      const supported = Array.from(autoLimit.options).some((option) => Number(option.value) === autoLimitMs);
+    const autoLimitUs = Number(params.AutoExposureTimeUpperLimit);
+    // Config is microseconds; UI options are whole milliseconds (10/20/30/40/50).
+    const autoLimitMs = Number.isFinite(autoLimitUs) ? Math.round(autoLimitUs / 1000) : NaN;
+    if (autoLimit && Number.isFinite(autoLimitMs) && autoLimitMs > 0) {
+      autoLimit.querySelectorAll("[data-current-value]").forEach((option) => option.remove());
+      const value = String(autoLimitMs);
+      const supported = Array.from(autoLimit.options).some((option) => option.value === value);
       if (!supported) {
         const current = document.createElement("option");
-        current.value = String(autoLimitMs);
-        const label = Number.isInteger(autoLimitMs) ? String(autoLimitMs) : autoLimitMs.toFixed(1);
-        current.textContent = `当前 ${label} ms（请选择新档位）`;
+        current.value = value;
+        current.textContent = `当前 ${value} ms（请选择新档位）`;
         current.dataset.currentValue = "true";
         autoLimit.prepend(current);
       }
-      autoLimit.value = String(autoLimitMs);
+      autoLimit.value = value;
+      // If assignment still failed, force-select the matching option.
+      if (autoLimit.value !== value) {
+        const match = Array.from(autoLimit.options).find((option) => option.value === value);
+        if (match) match.selected = true;
+      }
     }
   }
   setVal("camGainAuto", params.GainAuto);
@@ -366,6 +373,7 @@ async function applyCameraExposureMode(mode) {
   if (mode !== "Off") params.GainAuto = 0;
   toast("曝光方式切换中，相机会重启约 2 秒…");
   try {
+    closeCameraStream();
     const res = await fetch("/api/camera/config", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
@@ -375,11 +383,14 @@ async function applyCameraExposureMode(mode) {
     if (!res.ok || data.ok === false) throw new Error(data.output || data.message || `HTTP ${res.status}`);
     fillCameraForm(data.params || params);
     setText("cameraRunState", "重启中/运行中");
-    closeCameraStream();
-    setTimeout(() => ensureCameraStream(), 1500);
+    setText("cameraDebugMeta", "相机重启中，准备重连预览…");
+    setTimeout(() => ensureCameraStream(cameraStreamProfile || "default", true), 1500);
   } catch (err) {
     toast(`曝光方式切换失败: ${err.message}`);
     await refreshCameraConfig();
+    if (cameraStreamShouldReconnect()) {
+      setTimeout(() => ensureCameraStream(cameraStreamProfile || "default", true), 1500);
+    }
   }
 }
 
@@ -420,6 +431,7 @@ async function applyCameraConfig(restart = true) {
   const params = readCameraFormParams();
   toast(restart ? "写入配置并重启相机…" : "仅保存配置…");
   try {
+    if (restart) closeCameraStream();
     const res = await fetch("/api/camera/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -436,13 +448,17 @@ async function applyCameraConfig(restart = true) {
     await refreshCameraConfig();
     if (!restart) setCameraConfigDirty(true);
     if (restart) {
+      setText("cameraDebugMeta", "相机重启中，准备重连预览…");
       setTimeout(() => {
-        ensureCameraStream();
+        ensureCameraStream(cameraStreamProfile || "default", true);
         toast("请查看预览是否曝光正常");
       }, 1500);
     }
   } catch (err) {
     toast(`应用失败: ${err.message}`);
+    if (restart && cameraStreamShouldReconnect()) {
+      setTimeout(() => ensureCameraStream(cameraStreamProfile || "default", true), 1500);
+    }
   }
 }
 
@@ -450,6 +466,7 @@ async function applyCameraPreset(presetId) {
   if (!presetId) return;
   toast(`应用预设 ${presetId}…`);
   try {
+    closeCameraStream();
     const res = await fetch("/api/camera/preset", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -462,9 +479,13 @@ async function applyCameraPreset(presetId) {
     if (data.output) $("logBox").textContent = data.output;
     await refreshStatus();
     await refreshCameraConfig();
-    setTimeout(() => ensureCameraStream(), 1500);
+    setText("cameraDebugMeta", "相机重启中，准备重连预览…");
+    setTimeout(() => ensureCameraStream(cameraStreamProfile || "default", true), 1500);
   } catch (err) {
     toast(`预设失败: ${err.message}`);
+    if (cameraStreamShouldReconnect()) {
+      setTimeout(() => ensureCameraStream(cameraStreamProfile || "default", true), 1500);
+    }
   }
 }
 
@@ -520,11 +541,13 @@ function renderDataDetail(map) {
   const detail = $("dataMapDetail");
   const previewBtn = $("openDataPreview");
   const offlineBtn = $("startOfflineMap");
+  const deleteBtn = $("deleteDataScan");
   if (!detail) return;
   if (!map) {
     detail.innerHTML = `<div class="empty"><strong>选择左侧扫描记录</strong><span>完成建图后，结果会出现在此列表</span></div>`;
     if (previewBtn) previewBtn.disabled = true;
     if (offlineBtn) offlineBtn.disabled = true;
+    if (deleteBtn) deleteBtn.disabled = true;
     return;
   }
   const files = map.files || [];
@@ -560,6 +583,10 @@ function renderDataDetail(map) {
   if (offlineBtn) {
     offlineBtn.disabled = !map.can_offline_map;
     offlineBtn.textContent = map.has_map ? "重新离线建图" : "离线建图";
+  }
+  if (deleteBtn) {
+    deleteBtn.disabled = map.can_delete === false;
+    deleteBtn.textContent = "删除数据";
   }
 }
 
@@ -624,6 +651,37 @@ async function cancelOfflineMap() {
     toast("正在安全停止离线建图");
   } catch (err) {
     toast(`停止失败: ${err.message}`);
+  }
+}
+
+async function deleteDataScan() {
+  const scan = dataMaps.find((item) => item.id === selectedDataMapId);
+  if (!scan) return;
+  if (scan.can_delete === false) {
+    toast("录制中或离线建图中的数据不能删除");
+    return;
+  }
+  const sizeText = scan.total_size != null ? fmtSize(scan.total_size) : "未知大小";
+  const ok = window.confirm(
+    `确定删除扫描数据？\n\nID：${scan.id}\n大小：${sizeText}\n\n将永久删除 bag、点云和导出目录，不可恢复。`
+  );
+  if (!ok) return;
+  const deleteBtn = $("deleteDataScan");
+  if (deleteBtn) deleteBtn.disabled = true;
+  try {
+    const res = await fetch("/api/fastlivo/scans/delete", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({scan_id: scan.id}),
+    });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.message || data.output || `HTTP ${res.status}`);
+    if (selectedDataMapId === scan.id) selectedDataMapId = null;
+    await refreshDataMaps();
+    toast(data.message || `已删除 ${scan.id}`);
+  } catch (err) {
+    toast(`删除失败: ${err.message}`);
+    if (deleteBtn) deleteBtn.disabled = scan.can_delete === false;
   }
 }
 
@@ -875,8 +933,8 @@ function ensurePointStream(mode = pointStreamMode) {
   };
 }
 
-function ensureCameraStream(profile = cameraStreamProfile) {
-  if (cameraWs && cameraStreamProfile === profile) return;
+function ensureCameraStream(profile = cameraStreamProfile, force = false) {
+  if (!force && cameraWs && cameraStreamProfile === profile) return;
   if (cameraWs) closeCameraStream();
   cameraStreamProfile = profile;
   if (cameraReconnectTimer) {
@@ -1721,6 +1779,7 @@ function bindUi() {
   $("refreshDataMaps")?.addEventListener("click", () => refreshDataMaps());
   $("openDataPreview")?.addEventListener("click", () => openDataPreview());
   $("startOfflineMap")?.addEventListener("click", () => startOfflineMap());
+  $("deleteDataScan")?.addEventListener("click", () => deleteDataScan());
   $("cancelOfflineMap")?.addEventListener("click", () => cancelOfflineMap());
   $("connectStreams").addEventListener("click", reconnectStreams);
   $("toggleFullscreen").addEventListener("click", toggleFullscreen);

@@ -658,11 +658,56 @@ def list_fastlivo_scans():
             "has_downsampled": down_pcd.is_file(),
             "has_map": has_map,
             "can_offline_map": bool(bag and status not in ("recording", "running", "invalid")),
+            "can_delete": status not in ("recording", "running"),
             "saved_at": metadata.get("saved_at"),
             "workflow": metadata.get("workflow") or {},
             "total_size": sum(item["size"] for item in files),
         })
     return {"ok": True, "root": str(FASTLIVO_MAP_ROOT), "scans": scans}
+
+
+def action_fastlivo_scan_delete(scan_id):
+    """Permanently delete one scan directory under fast_livo2_maps (and matching gs export)."""
+    with WORKFLOW_LOCK:
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", scan_id or ""):
+            return {"ok": False, "message": "扫描ID不合法"}
+        scan_dir = (FASTLIVO_MAP_ROOT / scan_id).resolve()
+        root = FASTLIVO_MAP_ROOT.resolve()
+        if scan_dir.parent != root or not scan_dir.is_dir():
+            return {"ok": False, "message": "扫描记录不存在"}
+        active_record = read_active_recording()
+        if active_record.get("scan_id") == scan_id:
+            return {"ok": False, "message": "该记录正在录制，不能删除"}
+        offline_job = read_offline_job()
+        if offline_job.get("scan_id") == scan_id and offline_job.get("status") in (
+            "starting", "running", "draining", "saving", "cancel_requested",
+        ):
+            return {"ok": False, "message": "该记录正在离线建图，请先停止后再删除"}
+        active_scan = read_active_fastlivo_scan()
+        if active_scan.get("scan_id") == scan_id or pathlib.Path(str(active_scan.get("scan_dir") or "")).name == scan_id:
+            return {"ok": False, "message": "该记录正在实时建图，不能删除"}
+        size_before = 0
+        try:
+            for path in scan_dir.rglob("*"):
+                if path.is_file():
+                    size_before += path.stat().st_size
+        except OSError:
+            size_before = 0
+        safe_remove_path(scan_dir, FASTLIVO_MAP_ROOT)
+        gs_dir = (GS_DATASET_ROOT / scan_id).resolve()
+        gs_removed = False
+        if gs_dir.is_dir() and gs_dir.parent == GS_DATASET_ROOT.resolve():
+            safe_remove_path(gs_dir, GS_DATASET_ROOT)
+            gs_removed = not gs_dir.exists()
+        if scan_dir.exists():
+            return {"ok": False, "message": f"删除失败，目录仍存在: {scan_dir}"}
+        return {
+            "ok": True,
+            "scan_id": scan_id,
+            "freed_bytes": size_before,
+            "gs_dataset_removed": gs_removed,
+            "message": f"已删除扫描数据 {scan_id}",
+        }
 
 
 def update_scan_workflow(scan_dir, section, values):
@@ -2440,6 +2485,9 @@ async def handle_http(reader, writer):
             json_response(writer, action_fastlivo_offline_start(str(payload.get("scan_id") or "")))
         elif method == "POST" and clean_path == "/api/fastlivo/offline/cancel":
             json_response(writer, action_fastlivo_offline_cancel())
+        elif method == "POST" and clean_path == "/api/fastlivo/scans/delete":
+            payload = parse_json_body() or {}
+            json_response(writer, action_fastlivo_scan_delete(str(payload.get("scan_id") or "")))
         elif method == "POST" and clean_path == "/api/lio/start":
             json_response(writer, action_lio_start())
         elif method == "POST" and clean_path == "/api/lio/stop":

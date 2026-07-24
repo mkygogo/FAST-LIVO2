@@ -656,13 +656,26 @@ main {
 }
 
 .camera-auto-limit .camera-control-title { color: #fff; }
+.camera-auto-limit .camera-control-help { color: #aebdc7; }
+
+/* Must beat later .camera-control select { background:#fff } or text becomes white-on-white. */
+.camera-control.camera-auto-limit select,
 .camera-auto-limit select {
   min-height: 48px;
   margin-top: 8px;
+  padding: 0 12px;
   background: #0d151c;
   color: #fff;
-  border-color: #496173;
+  border: 1px solid #496173;
+  border-radius: 8px;
   font-size: 17px;
+  font-weight: 650;
+}
+
+.camera-control.camera-auto-limit select option,
+.camera-auto-limit select option {
+  background: #0d151c;
+  color: #fff;
 }
 
 .camera-auto-limit-apply {
