@@ -302,6 +302,19 @@ On the mini PC, FAST-Calib2 is deployed independently at:
 /home/jr/fast_livo2_data/calib/fast_calib2
 ```
 
+Its authoritative source repository is:
+
+```text
+git@github.com:mkygogo/JR-FAST-Calib2.git
+```
+
+The deployed source directory is a checkout of that repository. It carries
+`origin` for the JR fork and `upstream` for `hku-mars/FAST-Calib`; preserve both
+remotes when updating it. Detector source, target artwork, portable defaults,
+and project-specific maintenance guidance are kept in that repository. Runtime
+datasets, bags, point clouds, logs, and generated calibration results remain
+outside Git under `/home/jr/fast_livo2_data/calib/`.
+
 The desktop launcher `FAST-Calib2雷达相机标定` uses a separate
 `/home/jr/fast_livo2_data/calib/fast_calib2_mv_cs050` data root for the new
 camera so that its datasets cannot be mixed with the June 2026 datasets from
@@ -354,9 +367,10 @@ to its static first 3 seconds extracted four centers and produced 1.5 mm
 single-scene RMSE. Do not loosen FAST-Calib2 thresholds to compensate for motion.
 
 The Mid360 can return uneven intensities from the four reflective annuli at some
-board angles. Apply
-`fast_livo2_console/patches/fast_calib2_mid360_annulus_threshold.patch` to the
-separate FAST-Calib2 source. It only falls back from an outlier-dominated
+board angles. The maintained implementation is already included in
+`JR-FAST-Calib2`; `fast_livo2_console/patches/fast_calib2_mid360_annulus_threshold.patch`
+is retained only as a compatibility patch for older FAST-Calib2 checkouts. The
+implementation only falls back from an outlier-dominated
 relative threshold when the measured p92 still belongs to the stable foreground
 range; circle cluster size, radius/residual checks, and four-center geometry
 validation remain unchanged. It also raises the coarse Auto ROI saturated-outlier
@@ -367,8 +381,9 @@ static scene that originally lost two annuli at intensity 194 passes at the
 foreground threshold 150 with 5.2 mm RMSE, while the known 12-second moving scene
 must remain rejected.
 
-Its console-side dataset and run helpers are deployment tooling rather than
-vendored FAST-Calib2 source.
+Console-side device, recording, dataset selection, and run helpers remain
+deployment tooling in this repository; detector and solver source belong in
+`JR-FAST-Calib2`.
 
 The camera/lens pair was replaced in July 2026. The old `1280×1024` intrinsic
 file belongs to `MV-CA013-A0UC` and must not be treated as calibrated data for

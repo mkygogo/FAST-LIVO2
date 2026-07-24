@@ -44,7 +44,11 @@ We open-source our handheld device, including CAD files, synchronization scheme,
 Our associate dataset [**FAST-LIVO2-Dataset**](https://connecthkuhk-my.sharepoint.com/:f:/g/personal/zhengcr_connect_hku_hk/ErdFNQtjMxZOorYKDTtK4ugBkogXfq1OfDm90GECouuIQA?e=KngY9Z) used for evaluation is also available online.
 
 ### 1.5 Our LiDAR-camera calibration method
-The [**FAST-Calib**](https://github.com/hku-mars/FAST-Calib) toolkit is recommended. Its output extrinsic parameters can be directly filled into the YAML file. 
+The [**FAST-Calib**](https://github.com/hku-mars/FAST-Calib) toolkit is recommended. Its output extrinsic parameters can be directly filled into the YAML file.
+
+This JR scanner deployment maintains its Mid360 reflective-annulus detector and
+calibration target assets in the separate
+[**JR-FAST-Calib2**](https://github.com/mkygogo/JR-FAST-Calib2) repository.
 
 ## 2. Prerequisited
 
