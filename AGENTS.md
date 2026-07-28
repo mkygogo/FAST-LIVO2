@@ -45,7 +45,7 @@ fast_livo2_console/
     jr_usb_camera_calibration.py    Generic USB checkerboard capture/calibration
     jr_solve_camera_calibration.py  Offline intrinsic solver for captured images
     jr_camera_calibration_app.py    ROS Image touch-friendly calibration app
-    ros_image_stream.py             ROS Image to low-FPS JPEG JSON-line bridge
+    ros_image_stream.py             ROS compressed-preview passthrough/fallback bridge
     build_replay_pack.py            Build optional map trajectory replay assets
     map_viewer_server.py            Standalone HTTP server for offline PCD/PLY viewing
     pcd_to_ply.py                   Convert binary PCD with RGB fields to binary PLY
@@ -54,6 +54,10 @@ fast_livo2_console/
                                     Patch for mkygogo/FAST_LIO integration
     hikrobot_camera_auto_exposure.patch
                                     Hardware auto-exposure patch for Hikrobot driver
+    hikrobot_camera_dual_stream.patch
+                                    High-FPS JPEG preview + timestamp-sampled 10 FPS native stream
+    hikrobot_camera_record_rate_health.patch
+                                    Lightweight saved-frame rate marker for the console HUD
   docs/
     fast_lio_integration.md         How FAST_LIO is integrated
 ```
@@ -203,8 +207,17 @@ Keep the UI model simple for the touch-screen operator:
   saved `all_raw_points.pcd` in the 3D viewer.
 - `录制数据` starts only the Mid360, Hikrobot camera, and a lossless LZ4 bag for
   `/left_camera/image`, `/livox/lidar`, and `/livox/imu`; it must not start
-  FAST-LIVO2. The video preview is low latency and the 3D preview replaces each
-  batch with the latest raw LiDAR frame instead of accumulating unregistered data.
+  FAST-LIVO2. The production camera driver captures up to 25 FPS, publishes a
+  960-pixel-wide JPEG preview on `/hikrobot_camera/preview/compressed`, and
+  timestamp-samples native `2448×2048` frames to `/left_camera/image` at 10 FPS
+  for rosbag/mapping/3DGS. The actual preview rate may be lower when exposure
+  approaches the frame period. The 3D preview replaces each batch with the
+  latest raw LiDAR frame instead of accumulating unregistered data.
+- Recording startup must verify real messages in order: start the Mid360 ROS
+  master/driver, confirm `/livox/lidar` and `/livox/imu`, start the camera,
+  confirm `/left_camera/image`, and only then launch `rosbag record`. A failed
+  readiness check must clean up the named device containers and must not leave a
+  video-only or otherwise partial bag behind.
 - New recordings are written directly under
   `fast_livo2_maps/<timestamp>/<timestamp>-gs-raw.bag` with a 1 GiB rosbag
   buffer. Warn below 30 GiB free, refuse to start below 15 GiB, and gracefully
@@ -271,6 +284,12 @@ Apply this after the existing Hikrobot trigger/timestamp integration in
 `ExposureTime` node and publish that value in `/hikrobot_camera/frame_info`.
 `ros_image_stream.py` attaches the latest value to `/ws/camera` image messages
 as `exposure_us`.
+
+For production scanning, then apply `hikrobot_camera_dual_stream.patch` followed
+by `hikrobot_camera_record_rate_health.patch`, deploy
+`fast_livo2_console/launch/hikrobot_camera_continuous.launch`, and rebuild the
+`hikrobot_camera` package. The high-rate preview must never replace
+`/left_camera/image` in bags; that topic remains native resolution at 10 FPS.
 
 ## Camera Intrinsic Calibration
 
@@ -341,10 +360,16 @@ blind `rosbag record`. The 1024x600 touch layout detects ArUco DICT_6X6_250 IDs
 1/2/3/4, shows marker count, safe framing, brightness, and camera health, then
 keeps previewing during the 3-second recording. At least three expected
 markers are required; all four inside the safe border is the recommended state.
-After a successful bag, the preview remains open and displays bag size until the
-operator taps Done. The calibration trigger config uses a 30 ms auto-exposure
-ceiling because the real board scene remained underexposed at the old 10 ms
-limit; gain remains fixed.
+After the bag index is finalized, the same screen automatically runs the
+maintained `lidar_center_test` detector on the recorded bag. It displays
+`LiDAR circles 4/4` and marks the dataset valid only when all four
+geometry-consistent annuli are found. A failed check displays the observed
+candidate count (for example `2/4`) and offers an in-place Retry after the
+operator adjusts the target angle. Do not replace this with a simplified
+image-only circle check: the validation must use the recorded Mid360
+reflectivity data and the production detector. The calibration trigger config
+uses a 30 ms auto-exposure ceiling because the real board scene remained
+underexposed at the old 10 ms limit; gain remains fixed.
 
 Single-scene calibration is run by `run_fast_calib2_single.sh`. Dataset names
 may contain either host-local time or container UTC time, so “latest” must be
@@ -355,13 +380,17 @@ long-lived `roslaunch` in `docker compose run`. A generated result is accepted
 only when four LiDAR centers were found and the rotation matrix is nonzero.
 
 Multi-scene calibration is run by `run_fast_calib2_calibration.sh --mode multi`.
-It selects exactly the latest three complete datasets by filesystem modification
-time, reverses them into chronological order, and validates each through the
-one-shot single-scene runner. It must not scan every historical directory or
-silently fall back to an older scene when one of the latest three fails. After
-three valid center records are collected, run `multi_fast_calib` directly in the
-existing `jr_hik_trig_view` container; do not use `docker compose run` plus the
-long-lived single-scene `calib.launch` for extraction.
+It selects exactly the latest three eligible datasets by filesystem modification
+time. For recordings with `lidar_validation` metadata, eligibility requires
+`status=complete`, `lidar_validation.status=passed`, and `center_count=4`;
+explicitly invalid Retry artifacts must be skipped. Legacy datasets without the
+new validation object remain compatible. The selected datasets are reversed
+into chronological order and validated through the one-shot single-scene
+runner. It must not silently replace a selected eligible scene with an older
+one when extraction fails. After three valid center records are collected, run
+`multi_fast_calib` directly in the existing `jr_hik_trig_view` container; do not
+use `docker compose run` plus the long-lived single-scene `calib.launch` for
+extraction.
 
 The target and scanner must remain completely static during those 3 seconds.
 A July test where the rolling target moved about 15 cm during a 12-second bag
@@ -397,11 +426,12 @@ the new camera. Before production FAST-LIVO2 scans, calibrate the new
 The new camera/lens pair was calibrated on 2026-07-21 using 40 native
 `2448x2048` checkerboard images. Because the deployed vikit loader accepts only
 `k1/k2/p1/p2`, `config/camera_pinhole.yaml` uses a compatible solve with `k3`
-fixed to zero (RMS `0.115039 px`). The LiDAR-camera extrinsic was then solved
-from the latest three static FAST-Calib2 scenes (front, left-oblique,
-right-oblique). The accepted multi-scene result is under
-`fast_livo2_data/calib/fast_calib2_mv_cs050/results/20260721-143813-multi`, with
-joint RMSE 0.0101 m. Its `Rcl/Pcl` values are deployed in
+fixed to zero (RMS `0.115039 px`). After a later hardware adjustment, the
+LiDAR-camera extrinsic was recalibrated on 2026-07-27 from three eligible static
+FAST-Calib2 scenes (left-oblique, front, right-oblique). Their single-scene
+RMSE values were 1.1, 1.9, and 2.1 mm; the accepted result is under
+`fast_livo2_data/calib/fast_calib2_mv_cs050/results/20260727-140300-multi`, with
+joint RMSE 0.0024 m. Its `Rcl/Pcl` values are deployed in
 `FAST-LIVO2/config/mid360.yaml`; `camera_pinhole.yaml` remains the intrinsic-only
 camera configuration. Recalibrate after moving the camera, lens, or Mid360 mount.
 Keep `scale: 0.5`; FAST-LIVO2 therefore processes `1224x1024` images while the
@@ -470,6 +500,22 @@ Current behavior:
 - The preview page shows camera video and a Three.js cumulative 3D map together.
 - The production `实时建图` page shows camera video and a Three.js 3D map together;
   there is no separate primary preview page.
+- The production `录制数据` page is a fixed three-column 1024×600 layout: recording
+  and camera/LiDAR/IMU health on the left, an unobstructed camera canvas in the
+  center, and duration/size/storage/exposure/scan ID plus the optional LiDAR
+  preview button on the right. Do not move status cards back over the image.
+  The LiDAR preview is off by default and, when enabled, replaces only the center
+  viewport; otherwise `/ws/points?mode=health` reports rates without sending
+  point batches or running the hidden Three.js renderer.
+- `/ws/camera` sends a small JSON metadata prefix plus binary JPEG bytes. The
+  recording canvas keeps only the newest pending frame, decodes with
+  `createImageBitmap`, draws on `requestAnimationFrame`, caches its size/context,
+  and closes obsolete bitmaps. Do not restore per-frame base64 data URLs,
+  `getBoundingClientRect()` calls, high-DPI backing buffers, or translucent
+  `backdrop-filter` HUDs on the moving video.
+- Keep hidden-page work out of animation hot paths. In particular, do not render
+  the Three.js scene while the active page does not display it, and avoid DOM
+  writes when displayed text has not changed.
 - The live map defaults to FPS follow mode using `/aft_mapped_to_init`, with
   `/path` as a fallback for heading/position context. Fullscreen mode exposes
   two touch joysticks for free-fly roaming:
@@ -534,6 +580,14 @@ with dropped images.
 the browser and should preserve RGB fields when available. Do not log or persist
 full point frames in the web server logs. `ros_image_stream.py` sends JPEG frames
 through `/ws/camera`; server logs must omit the base64 image payload.
+
+`server.py` serves HTTP and live WebSockets on one asyncio loop. `api_status()`
+runs Docker, network, ROS-topic, and filesystem checks that can take about one
+second; `/api/status` must therefore execute it with `asyncio.to_thread()`.
+Running it synchronously pauses the camera WebSocket on every five-second browser
+poll: the reported average remains near 25 FPS, but frames arrive in bursts after
+a roughly one-second visible freeze. Keep other slow shell/filesystem work off
+the event loop when adding frequently polled APIs.
 
 ## Build and Verification Commands
 

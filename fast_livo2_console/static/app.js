@@ -1,17 +1,31 @@
 const $ = (id) => document.getElementById(id);
 
 let statusTimer = null;
+let recordClockTimer = null;
 let pointWs = null;
 let cameraWs = null;
 let cameraReconnectTimer = null;
+let cameraFramePending = null;
+let cameraFrameDrawing = false;
+let cameraFrameGeneration = 0;
+let cameraObjectUrl = null;
+let recordCanvasContext = null;
+let recordCanvasMetrics = null;
+let cameraMetadataUpdatedAt = 0;
 let cameraExposureMode = "Off";
 let cameraExposureLast = null;
 let cameraExposureStableFrames = 0;
 let cameraConfigParams = {};
 let scanState = "idle";
 let recordState = "idle";
+let recordElapsedBase = 0;
+let recordElapsedSyncedAt = performance.now();
 let workflowMode = "idle";
 let pointStreamMode = "mapping";
+let recordRadarPreviewEnabled = false;
+let recordSensorRates = {};
+let recordSensorHealth = {};
+let activePageId = "fastlivo";
 let cameraStreamProfile = "default";
 let lastOfflineStatus = "";
 let sceneMode = "live";
@@ -87,7 +101,7 @@ function toast(message) {
 
 function setText(id, text) {
   const el = $(id);
-  if (el) el.textContent = text;
+  if (el && el.textContent !== String(text)) el.textContent = text;
 }
 
 function setScanState(state, detail = "") {
@@ -109,9 +123,62 @@ function setScanState(state, detail = "") {
 function setRecordState(state, detail = "") {
   recordState = state;
   const labels = {idle: "未开始", starting: "设备启动中", recording: "正在无损录制", stopping: "正在完成bag索引", valid: "录制完成，数据完整", invalid: "数据校验异常"};
-  setText("recordStateText", detail || labels[state] || state);
+  const text = detail || labels[state] || state;
+  setText("recordStateText", text);
+  setText("recordHudState", text);
+  $("recordHealth")?.classList.toggle("recording", state === "recording");
   $("startRecord").disabled = state === "starting" || state === "recording" || state === "stopping" || workflowMode === "offline_mapping" || workflowMode === "realtime_mapping";
   $("stopRecord").disabled = state !== "recording";
+  if ($("toggleRecordRadarPreview")) $("toggleRecordRadarPreview").disabled = state !== "recording";
+}
+
+function resetRecordSensorStatus() {
+  recordSensorRates = {};
+  recordSensorHealth = {};
+  syncRecordElapsed(0);
+  setText("recordCameraHz", "预览 - · 保存 -");
+  setText("recordLidarHz", "-");
+  setText("recordImuHz", "-");
+  setText("recordCameraHealthValue", "等待");
+  setText("recordLidarHealthValue", "等待");
+  setText("recordImuHealthValue", "等待");
+  setText("recordLidarDetail", "点数尚未收到");
+  setText("recordImuDetail", "等待惯导消息");
+  setText("recordSensorSummary", "正在确认三路数据");
+  ["recordCameraHealth", "recordLidarHealth", "recordImuHealth"].forEach((id) => {
+    const card = $(id);
+    card?.classList.remove("bad");
+    card?.classList.add("waiting");
+  });
+}
+
+function updateRecordSensorStatus() {
+  const specs = [
+    ["recordCameraHealth", "recordCameraHealthValue", "/left_camera/image", 8],
+    ["recordLidarHealth", "recordLidarHealthValue", "/livox/lidar", 5],
+    ["recordImuHealth", "recordImuHealthValue", "/livox/imu", 100],
+  ];
+  let ready = 0;
+  let bad = 0;
+  for (const [cardId, valueId, topic, minimum] of specs) {
+    const value = Number(recordSensorRates[topic]);
+    const known = Number.isFinite(value);
+    const healthy = known && value >= minimum;
+    const card = $(cardId);
+    card?.classList.toggle("waiting", !known);
+    card?.classList.toggle("bad", known && !healthy);
+    setText(valueId, healthy ? "正常" : known ? "异常" : "等待");
+    if (healthy) ready++;
+    else if (known) bad++;
+  }
+  const points = Number(recordSensorHealth.lidar_points);
+  const lidarAge = Number(recordSensorHealth.lidar_age);
+  const imuAge = Number(recordSensorHealth.imu_age);
+  if (Number.isFinite(points) && points > 0) {
+    setText("recordLidarDetail", `${formatCount(points)} 点/帧${Number.isFinite(lidarAge) ? ` · ${lidarAge.toFixed(2)} 秒前` : ""}`);
+  }
+  if (Number.isFinite(imuAge)) setText("recordImuDetail", `最后消息 ${imuAge.toFixed(2)} 秒前`);
+  setText("recordSensorSummary", ready === 3 ? "三路数据正常" : bad ? "数据频率异常" : "正在确认三路数据");
 }
 
 function wsScheme() {
@@ -141,6 +208,28 @@ function fmtSize(bytes) {
   if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${bytes} B`;
+}
+
+function formatDuration(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  return hours > 0
+    ? `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+    : `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+}
+
+function syncRecordElapsed(seconds) {
+  recordElapsedBase = Math.max(0, Number(seconds) || 0);
+  recordElapsedSyncedAt = performance.now();
+  setText("recordElapsed", formatDuration(recordElapsedBase));
+}
+
+function updateRecordClock() {
+  if (recordState !== "recording") return;
+  const elapsed = recordElapsedBase + Math.max(0, performance.now() - recordElapsedSyncedAt) / 1000;
+  setText("recordElapsed", formatDuration(elapsed));
 }
 
 function clampByte(value) {
@@ -183,12 +272,15 @@ function headingToThreeDirection(yaw) {
 }
 
 function showTab(id) {
+  activePageId = id;
+  document.body.classList.toggle("record-mode", id === "record");
   document.querySelectorAll(".tab").forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === id));
   document.querySelectorAll(".page").forEach((page) => page.classList.toggle("active", page.id === id));
-  if (id === "fastlivo" || id === "record") {
+  if (id === "fastlivo" || (id === "record" && recordRadarPreviewEnabled)) {
     attachThreeRenderer(id === "record" ? "recordThreeViewport" : "threeViewport");
     setTimeout(resizeThree, 60);
   }
+  if (id === "record") setTimeout(resizeRecordCanvas, 0);
   if (id === "data") refreshDataMaps();
   if (id === "camera") {
     refreshCameraConfig();
@@ -798,9 +890,10 @@ async function refreshStatus() {
     setText("bagsDirPath", bags.path || "-");
 
     const topics = data.topics || [];
-    $("topicList").innerHTML = topics.length
+    const topicHtml = topics.length
       ? topics.map((topic) => `<span class="chip">${escapeHtml(topic)}</span>`).join("")
       : `<span class="chip">暂无 ROS topic</span>`;
+    if ($("topicList").innerHTML !== topicHtml) $("topicList").innerHTML = topicHtml;
     setText("cameraState", topics.some((t) => t.includes("camera") || t.includes("rgb_img")) ? "检测到图像 topic" : "等待硬件");
 
     workflowMode = data.workflow || "idle";
@@ -811,14 +904,14 @@ async function refreshStatus() {
     const recording = data.recording || {};
     if (recording.active) {
       setRecordState("recording", "正在无损录制");
-      setText("recordElapsed", `${Math.floor(Number(recording.elapsed || 0) / 60)}:${String(Math.floor(Number(recording.elapsed || 0) % 60)).padStart(2, "0")}`);
+      syncRecordElapsed(recording.elapsed);
       setText("recordSize", fmtSize(recording.size || 0));
       setText("recordDiskFree", fmtSize(recording.free_bytes || 0));
       setText("recordTimeLeft", recording.estimated_seconds_left == null ? "计算中" : `${Math.floor(recording.estimated_seconds_left / 60)} 分钟`);
       setText("recordScanId", recording.scan_id || "-");
       $("recordHealth")?.classList.toggle("warning", Boolean(recording.warning));
       if (!cameraWs) ensureCameraStream("recording");
-      if (!pointWs) ensurePointStream("lidar");
+      if (!pointWs) ensurePointStream(recordRadarPreviewEnabled ? "lidar" : "health");
     } else if (recordState === "recording") {
       setRecordState("idle");
     } else {
@@ -872,19 +965,27 @@ async function loadLogs(target) {
 function updateRates(rates) {
   if (rates["/livox/lidar"] != null) {
     setText("hzLidar", `${rates["/livox/lidar"]} Hz`);
-    setText("recordLidarHz", `${rates["/livox/lidar"]} / ${rates["/livox/imu"] ?? "-"} Hz`);
+    setText("recordLidarHz", `${rates["/livox/lidar"]} Hz`);
   }
   if (rates["/livox/imu"] != null) {
     setText("hzImu", `${rates["/livox/imu"]} Hz`);
-    setText("recordLidarHz", `${rates["/livox/lidar"] ?? "-"} / ${rates["/livox/imu"]} Hz`);
+    setText("recordImuHz", `${rates["/livox/imu"]} Hz`);
   }
   if (rates["/cloud_registered"] != null) setText("hzCloud", `${rates["/cloud_registered"]} Hz`);
   if (rates["/path"] != null) setText("hzPath", `${rates["/path"]} Hz`);
   if (rates["/aft_mapped_to_init"] != null) setText("hzOdom", `${rates["/aft_mapped_to_init"]} Hz`);
-  if (rates["/rgb_img"] != null || rates["/left_camera/image"] != null) {
-    setText("cameraMeta", `/rgb_img ${rates["/rgb_img"] ?? "-"} Hz · /left_camera/image ${rates["/left_camera/image"] ?? "-"} Hz`);
-    setText("recordCameraHz", `${rates["/left_camera/image"] ?? rates["/rgb_img"] ?? "-"} Hz`);
+  recordSensorRates = {...recordSensorRates, ...rates};
+  const previewRate = recordSensorRates["/hikrobot_camera/preview/compressed"];
+  const savedRate = recordSensorRates["/left_camera/image"];
+  const mappedRate = recordSensorRates["/rgb_img"];
+  if (previewRate != null || savedRate != null || mappedRate != null) {
+    setText(
+      "cameraMeta",
+      `预览 ${previewRate ?? "-"} Hz · 保存 ${savedRate ?? "-"} Hz${mappedRate != null ? ` · 建图 ${mappedRate} Hz` : ""}`,
+    );
+    setText("recordCameraHz", `预览 ${previewRate ?? "-"} · 保存 ${savedRate ?? "-"}`);
   }
+  updateRecordSensorStatus();
 }
 
 function closePointStream() {
@@ -905,6 +1006,12 @@ function closeCameraStream() {
     socket.onclose = null;
     socket.close();
   }
+  cameraFramePending = null;
+  cameraFrameGeneration++;
+  if (cameraObjectUrl) {
+    URL.revokeObjectURL(cameraObjectUrl);
+    cameraObjectUrl = null;
+  }
 }
 
 function cameraStreamShouldReconnect() {
@@ -917,20 +1024,178 @@ function ensurePointStream(mode = pointStreamMode) {
   pointStreamMode = mode;
   pointWs = new WebSocket(`${wsScheme()}://${location.host}/ws/points?mode=${encodeURIComponent(mode)}&quality=${qualityMode}`);
   $("connectStreams").textContent = "重连预览";
-  pointWs.onopen = () => setText("viewerMeta", "三维实时预览已连接");
+  pointWs.onopen = () => {
+    if (mode === "health") setText("recordSensorSummary", "健康监控已连接");
+    else setText("viewerMeta", "三维实时预览已连接");
+  };
   pointWs.onclose = () => {
     pointWs = null;
-    if (sceneMode === "live") setText(mode === "lidar" ? "recordMapHud" : "viewerMeta", "三维实时预览已断开");
+    if (mode === "health") setText("recordSensorSummary", "健康监控已断开");
+    else if (sceneMode === "live") setText(mode === "lidar" ? "recordMapHud" : "viewerMeta", "三维实时预览已断开");
   };
-  pointWs.onerror = () => toast("三维连接失败");
+  pointWs.onerror = () => {
+    if (mode === "health") setText("recordSensorSummary", "健康监控连接失败");
+    else toast("三维连接失败");
+  };
   pointWs.onmessage = (event) => {
     const msg = JSON.parse(event.data);
     if (msg.type === "points") addLivePointBatch(msg);
     else if (msg.type === "path") updatePath(msg);
     else if (msg.type === "odom") updateOdom(msg);
-    else if (msg.type === "rates") updateRates(msg.rates || {});
-    else if (msg.type === "status") setText(mode === "lidar" ? "recordMapHud" : "viewerMeta", msg.message);
+    else if (msg.type === "rates") {
+      if (msg.health) recordSensorHealth = {...recordSensorHealth, ...msg.health};
+      updateRates(msg.rates || {});
+    }
+    else if (msg.type === "status") {
+      if (mode === "health") setText("recordSensorSummary", msg.message);
+      else setText(mode === "lidar" ? "recordMapHud" : "viewerMeta", msg.message);
+    }
   };
+}
+
+function setRecordRadarPreview(enabled, reconnect = true) {
+  recordRadarPreviewEnabled = Boolean(enabled);
+  const preview = $("recordRadarPreview");
+  const button = $("toggleRecordRadarPreview");
+  if (preview) preview.hidden = !recordRadarPreviewEnabled;
+  if (button) {
+    button.classList.toggle("active", recordRadarPreviewEnabled);
+    button.textContent = recordRadarPreviewEnabled ? "关闭雷达" : "雷达预览";
+  }
+  if (recordRadarPreviewEnabled) {
+    attachThreeRenderer("recordThreeViewport");
+    setTimeout(resizeThree, 60);
+  } else {
+    attachThreeRenderer("threeViewport");
+    clearScene(false);
+  }
+  if (reconnect && recordState === "recording") {
+    closePointStream();
+    ensurePointStream(recordRadarPreviewEnabled ? "lidar" : "health");
+  }
+}
+
+function activeCameraTarget() {
+  if (activePageId === "record") return ["recordCameraImage", "recordCameraEmpty", "recordCameraMeta"];
+  if (activePageId === "camera") return ["cameraDebugImage", "cameraDebugEmpty", "cameraDebugMeta"];
+  if (activePageId === "fastlivo") return ["cameraImage", "cameraEmpty", "cameraMeta"];
+  return null;
+}
+
+function updateCameraFrameMetadata(msg, metaId) {
+  const now = performance.now();
+  if (now - cameraMetadataUpdatedAt < 500) return;
+  cameraMetadataUpdatedAt = now;
+  if (metaId) setText(metaId, `${msg.topic || "image"} · ${msg.width || "?"}x${msg.height || "?"}`);
+  updateCameraExposure(msg.exposure_us);
+  if (msg.exposure_us) {
+    setText("recordExposure", Number(msg.exposure_us) >= 1000
+      ? `${(Number(msg.exposure_us) / 1000).toFixed(2)} ms`
+      : `${Number(msg.exposure_us).toFixed(0)} µs`);
+  }
+}
+
+function resizeRecordCanvas() {
+  const canvas = $("recordCameraImage");
+  if (!canvas || !$("record")?.classList.contains("active")) return null;
+  canvas.style.display = "block";
+  const rect = canvas.getBoundingClientRect();
+  // The preview JPEG is already 960 pixels wide. A 1:1 CSS-pixel backing
+  // buffer avoids the extra fill work of a device-pixel-ratio multiplier.
+  const width = Math.max(1, Math.floor(rect.width));
+  const height = Math.max(1, Math.floor(rect.height));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+    recordCanvasContext = null;
+  }
+  if (!recordCanvasContext) {
+    recordCanvasContext = canvas.getContext("2d", {alpha: false, desynchronized: true});
+    recordCanvasContext.fillStyle = "#080d12";
+    recordCanvasContext.fillRect(0, 0, width, height);
+  }
+  recordCanvasMetrics = {width, height};
+  return recordCanvasMetrics;
+}
+
+async function pumpRecordCameraFrames() {
+  if (cameraFrameDrawing) return;
+  cameraFrameDrawing = true;
+  try {
+    while (cameraFramePending) {
+      const current = cameraFramePending;
+      cameraFramePending = null;
+      let bitmap;
+      try {
+        bitmap = await createImageBitmap(current.blob);
+        if (current.generation !== cameraFrameGeneration) continue;
+        const canvas = $("recordCameraImage");
+        if (!canvas || !$("record")?.classList.contains("active")) continue;
+        // A newer frame supersedes one that was still being decoded.
+        if (cameraFramePending) continue;
+        const metrics = recordCanvasMetrics || resizeRecordCanvas();
+        if (!metrics || !recordCanvasContext) continue;
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        if (current.generation !== cameraFrameGeneration || cameraFramePending) continue;
+        const {width, height} = metrics;
+        const ctx = recordCanvasContext;
+        const scale = Math.min(width / bitmap.width, height / bitmap.height);
+        const drawWidth = Math.max(1, Math.round(bitmap.width * scale));
+        const drawHeight = Math.max(1, Math.round(bitmap.height * scale));
+        const x = Math.round((width - drawWidth) / 2);
+        const y = Math.round((height - drawHeight) / 2);
+        ctx.drawImage(bitmap, x, y, drawWidth, drawHeight);
+        if ($("recordCameraEmpty")) $("recordCameraEmpty").style.display = "none";
+        updateCameraFrameMetadata(current.metadata, "recordCameraMeta");
+      } catch (err) {
+        setText("recordCameraMeta", `视频解码失败: ${err.message}`);
+      } finally {
+        bitmap?.close();
+      }
+    }
+  } finally {
+    cameraFrameDrawing = false;
+    if (cameraFramePending) pumpRecordCameraFrames();
+  }
+}
+
+function displayCameraBlob(blob, metadata) {
+  const target = activeCameraTarget();
+  if (!target) return;
+  if (target[0] === "recordCameraImage") {
+    // Keep only the newest frame while ImageBitmap decoding is in progress.
+    // Dropping an obsolete preview frame must never block rosbag recording.
+    cameraFramePending = {blob, metadata, generation: cameraFrameGeneration};
+    pumpRecordCameraFrames();
+    return;
+  }
+  const image = $(target[0]);
+  if (!image) return;
+  if (cameraObjectUrl) URL.revokeObjectURL(cameraObjectUrl);
+  cameraObjectUrl = URL.createObjectURL(blob);
+  image.src = cameraObjectUrl;
+  image.style.display = "block";
+  if ($(target[1])) $(target[1]).style.display = "none";
+  updateCameraFrameMetadata(metadata, target[2]);
+}
+
+function parseCameraBinaryFrame(buffer) {
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 5) return null;
+  const view = new DataView(buffer);
+  const metadataLength = view.getUint32(0, false);
+  if (metadataLength <= 0 || metadataLength > buffer.byteLength - 4) return null;
+  const metadataBytes = new Uint8Array(buffer, 4, metadataLength);
+  const metadata = JSON.parse(new TextDecoder().decode(metadataBytes));
+  const jpeg = new Uint8Array(buffer, 4 + metadataLength);
+  return {metadata, blob: new Blob([jpeg], {type: "image/jpeg"})};
+}
+
+function legacyBase64Blob(value) {
+  const encoded = String(value || "").replace(/^data:image\/jpeg;base64,/, "");
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], {type: "image/jpeg"});
 }
 
 function ensureCameraStream(profile = cameraStreamProfile, force = false) {
@@ -942,6 +1207,7 @@ function ensureCameraStream(profile = cameraStreamProfile, force = false) {
     cameraReconnectTimer = null;
   }
   const socket = new WebSocket(`${wsScheme()}://${location.host}/ws/camera?quality=${qualityMode}&profile=${encodeURIComponent(profile)}`);
+  socket.binaryType = "arraybuffer";
   cameraWs = socket;
   socket.onopen = () => setText("cameraMeta", "视频连接中");
   socket.onclose = () => {
@@ -958,6 +1224,15 @@ function ensureCameraStream(profile = cameraStreamProfile, force = false) {
   };
   socket.onerror = () => setText("cameraDebugMeta", "视频连接失败，准备重连…");
   socket.onmessage = (event) => {
+    if (event.data instanceof ArrayBuffer) {
+      try {
+        const frame = parseCameraBinaryFrame(event.data);
+        if (frame) displayCameraBlob(frame.blob, frame.metadata);
+      } catch (err) {
+        setText("recordCameraMeta", `视频帧错误: ${err.message}`);
+      }
+      return;
+    }
     let msg;
     try {
       msg = JSON.parse(event.data);
@@ -967,36 +1242,12 @@ function ensureCameraStream(profile = cameraStreamProfile, force = false) {
     // Bridge may send base64 under "data" (current) or legacy "jpeg_b64".
     const b64 = msg.jpeg_b64 || msg.data || msg.jpeg || "";
     if (msg.type === "image" && b64) {
-      const src = b64.startsWith("data:") ? b64 : `data:image/jpeg;base64,${b64}`;
-      const img = $("cameraImage");
-      if (img) {
-        img.src = src;
-        img.style.display = "block";
-      }
-      if ($("cameraEmpty")) $("cameraEmpty").style.display = "none";
-      setText("cameraMeta", `${msg.topic || "image"} · ${msg.width || "?"}x${msg.height || "?"}`);
-      const recordImg = $("recordCameraImage");
-      if (recordImg) {
-        recordImg.src = src;
-        recordImg.style.display = "block";
-      }
-      if ($("recordCameraEmpty")) $("recordCameraEmpty").style.display = "none";
-      setText("recordCameraMeta", `${msg.topic || "image"} · ${msg.width || "?"}x${msg.height || "?"}`);
-      const dbg = $("cameraDebugImage");
-      if (dbg) {
-        dbg.src = src;
-        dbg.style.display = "block";
-      }
-      if ($("cameraDebugEmpty")) $("cameraDebugEmpty").style.display = "none";
-      setText("cameraDebugMeta", `${msg.topic || "image"} · ${msg.width || "?"}x${msg.height || "?"}`);
-      updateCameraExposure(msg.exposure_us);
-      if (msg.exposure_us) setText("recordExposure", Number(msg.exposure_us) >= 1000 ? `${(Number(msg.exposure_us) / 1000).toFixed(2)} ms` : `${Number(msg.exposure_us).toFixed(0)} µs`);
+      displayCameraBlob(legacyBase64Blob(b64), msg);
     } else if ((msg.type === "rate" || msg.type === "rates") && msg.rates) {
       updateRates(msg.rates);
     } else if (msg.type === "status") {
-      setText("cameraMeta", msg.message || "视频状态更新");
-      setText("cameraDebugMeta", msg.message || "视频状态更新");
-      setText("recordCameraMeta", msg.message || "视频状态更新");
+      const metaId = activePageId === "record" ? "recordCameraMeta" : activePageId === "camera" ? "cameraDebugMeta" : "cameraMeta";
+      setText(metaId, msg.message || "视频状态更新");
     }
   };
 }
@@ -1057,6 +1308,8 @@ async function startRecordWorkflow() {
   closePointStream();
   closeCameraStream();
   clearScene(false);
+  setRecordRadarPreview(false, false);
+  resetRecordSensorStatus();
   sceneMode = "live";
   setViewMode("free");
   try {
@@ -1065,7 +1318,7 @@ async function startRecordWorkflow() {
     if (!res.ok || data.ok === false) throw new Error(data.message || data.output || `HTTP ${res.status}`);
     setText("recordScanId", data.scan_id || "-");
     ensureCameraStream("recording");
-    ensurePointStream("lidar");
+    ensurePointStream("health");
     setRecordState("recording");
     toast("无损数据录制已开始");
   } catch (err) {
@@ -1084,6 +1337,7 @@ async function stopRecordWorkflow() {
     if (!res.ok || data.ok === false) throw new Error(data.message || (data.bag_info?.errors || []).join("；") || `HTTP ${res.status}`);
     closePointStream();
     closeCameraStream();
+    setRecordRadarPreview(false, false);
     selectedDataMapId = data.scan_id || selectedDataMapId;
     setRecordState("valid");
     await refreshDataMaps();
@@ -1092,6 +1346,7 @@ async function stopRecordWorkflow() {
   } catch (err) {
     closePointStream();
     closeCameraStream();
+    setRecordRadarPreview(false, false);
     setRecordState("invalid", `录制结束，但校验异常: ${err.message}`);
     await refreshDataMaps();
     showTab("data");
@@ -1291,6 +1546,12 @@ function resizeThree() {
 }
 
 function renderLoop(now) {
+  const threeVisible = activePageId === "fastlivo" || (activePageId === "record" && recordRadarPreviewEnabled);
+  if (!threeVisible) {
+    lastRenderTime = now;
+    requestAnimationFrame(renderLoop);
+    return;
+  }
   const dt = Math.min(0.05, Math.max(0.001, (now - lastRenderTime) / 1000));
   lastRenderTime = now;
   renderFrames++;
@@ -1757,6 +2018,7 @@ function bindUi() {
   $("finishScan").addEventListener("click", finishScanWorkflow);
   $("startRecord").addEventListener("click", startRecordWorkflow);
   $("stopRecord").addEventListener("click", stopRecordWorkflow);
+  $("toggleRecordRadarPreview")?.addEventListener("click", () => setRecordRadarPreview(!recordRadarPreviewEnabled));
   $("viewFps").addEventListener("click", () => {
     followEnabled = sceneMode === "live";
     setViewMode("fps");
@@ -1807,6 +2069,10 @@ function bindUi() {
     btn.addEventListener("click", () => applyCameraPreset(btn.dataset.cameraPreset));
   });
   window.addEventListener("resize", resizeThree);
+  window.addEventListener("resize", () => {
+    recordCanvasMetrics = null;
+    if ($("record")?.classList.contains("active")) resizeRecordCanvas();
+  });
   document.addEventListener("fullscreenchange", updateFullscreenButton);
   document.addEventListener("webkitfullscreenchange", updateFullscreenButton);
 }
@@ -1819,7 +2085,10 @@ setTiltCorrection(tiltCorrectionEnabled, true);
 setPointSizeScale(pointSizeScale);
 setScanState("idle");
 setRecordState("idle");
+setRecordRadarPreview(false, false);
+resetRecordSensorStatus();
 setViewMode("fps");
 updateFullscreenButton();
 refreshStatus();
 statusTimer = setInterval(refreshStatus, 5000);
+recordClockTimer = setInterval(updateRecordClock, 250);

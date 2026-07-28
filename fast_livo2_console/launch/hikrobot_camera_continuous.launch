@@ -1,0 +1,23 @@
+<launch>
+  <arg name="config" default="$(find jr_fastlivo_validation)/config/hikrobot_camera_continuous_calib.yaml" />
+  <arg name="dual_stream" default="true" />
+  <arg name="preview_frame_rate" default="25.0" />
+  <arg name="record_frame_rate" default="10.0" />
+  <arg name="preview_width" default="960" />
+  <arg name="preview_jpeg_quality" default="70" />
+
+  <rosparam command="load" file="$(arg config)" />
+
+  <node pkg="hikrobot_camera"
+        type="hikrobot_camera"
+        name="hikrobot_camera"
+        output="screen">
+    <param name="DualStreamMode" value="$(arg dual_stream)" />
+    <param name="PreviewFrameRate" value="$(arg preview_frame_rate)" />
+    <param name="RecordFrameRate" value="$(arg record_frame_rate)" />
+    <param name="PreviewWidth" value="$(arg preview_width)" />
+    <param name="PreviewJpegQuality" value="$(arg preview_jpeg_quality)" />
+    <param name="RecordImageTopic" value="/left_camera/image" />
+    <param name="PreviewCompressedTopic" value="/hikrobot_camera/preview/compressed" />
+  </node>
+</launch>

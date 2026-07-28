@@ -118,34 +118,63 @@
           </div>
         </div>
 
-        <div class="record-health" id="recordHealth">
-          <div><span>录制时长</span><strong id="recordElapsed">-</strong></div>
-          <div><span>数据大小</span><strong id="recordSize">-</strong></div>
-          <div><span>磁盘剩余</span><strong id="recordDiskFree">-</strong></div>
-          <div><span>预计可录</span><strong id="recordTimeLeft">-</strong></div>
-          <div><span>相机</span><strong id="recordCameraHz">-</strong></div>
-          <div><span>雷达 / IMU</span><strong id="recordLidarHz">-</strong></div>
-          <div><span>曝光</span><strong id="recordExposure">-</strong></div>
-          <div><span>扫描 ID</span><strong id="recordScanId">-</strong></div>
-        </div>
+        <div class="record-video-stage" id="recordHealth">
+          <aside class="record-side record-side-left" aria-label="传感器状态">
+            <div class="record-hud-state">
+              <span class="record-dot"></span>
+              <strong id="recordHudState">未开始</strong>
+              <small id="recordCameraMeta">未连接</small>
+            </div>
+            <div class="record-sensor-summary" id="recordSensorSummary">等待录制</div>
+            <div class="record-hud-sensor waiting" id="recordCameraHealth">
+              <span>相机</span>
+              <strong id="recordCameraHealthValue">等待</strong>
+              <small id="recordCameraHz">-</small>
+            </div>
+            <div class="record-hud-sensor waiting" id="recordLidarHealth">
+              <span>LiDAR</span>
+              <strong id="recordLidarHealthValue">等待</strong>
+              <small id="recordLidarHz">-</small>
+            </div>
+            <div class="record-hud-sensor waiting" id="recordImuHealth">
+              <span>IMU</span>
+              <strong id="recordImuHealthValue">等待</strong>
+              <small id="recordImuHz">-</small>
+            </div>
+          </aside>
 
-        <div class="scan-preview">
-          <section class="video-panel">
-            <div class="panel-title"><strong>低延迟视频</strong><span id="recordCameraMeta">未连接</span></div>
-            <div class="camera-frame">
-              <img id="recordCameraImage" alt="录制视频预览">
-              <div id="recordCameraEmpty">等待 /left_camera/image</div>
-            </div>
-          </section>
-          <section class="map-panel">
-            <div class="panel-title"><strong>原始雷达当前帧</strong><span id="recordMapMeta">0 点</span></div>
-            <div class="three-wrap record-three-wrap">
+          <div class="record-camera-viewport">
+            <canvas id="recordCameraImage" aria-label="录制视频预览"></canvas>
+            <div id="recordCameraEmpty">等待 /left_camera/image</div>
+            <div id="recordRadarPreview" class="three-wrap record-three-wrap" hidden>
               <div id="recordThreeViewport"></div>
-              <div class="map-hud" id="recordMapHud">未连接</div>
+              <div class="map-hud" id="recordMapHud">预览未开启</div>
             </div>
-          </section>
+          </div>
+
+          <aside class="record-side record-side-right" aria-label="录制信息">
+            <div class="record-primary-grid">
+              <div class="record-hud-primary">
+                <small>录制时长</small>
+                <strong id="recordElapsed">00:00</strong>
+              </div>
+              <div class="record-hud-primary">
+                <small>数据大小</small>
+                <strong id="recordSize">-</strong>
+              </div>
+            </div>
+            <div class="record-metric-grid">
+              <div class="record-hud-metric"><span>磁盘</span><strong id="recordDiskFree">-</strong></div>
+              <div class="record-hud-metric"><span>可录</span><strong id="recordTimeLeft">-</strong></div>
+              <div class="record-hud-metric"><span>曝光</span><strong id="recordExposure">-</strong></div>
+              <div class="record-hud-metric record-hud-id"><span>ID</span><strong id="recordScanId">-</strong></div>
+            </div>
+            <button id="toggleRecordRadarPreview" class="record-radar-toggle" type="button" disabled>雷达预览</button>
+          </aside>
+
+          <div class="record-detail-sr-only" id="recordLidarDetail">点数尚未收到</div>
+          <div class="record-detail-sr-only" id="recordImuDetail">等待惯导消息</div>
         </div>
-        <p class="record-note">录制期间不运行 FAST-LIVO2；原始相机、雷达和 IMU 无损写入 bag。三维区域仅显示雷达最新一帧。</p>
       </section>
     </section>
 

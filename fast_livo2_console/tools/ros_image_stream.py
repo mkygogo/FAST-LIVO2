@@ -9,7 +9,7 @@ import time
 import cv2
 import numpy as np
 import rospy
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import String
 
 try:
@@ -19,8 +19,13 @@ except Exception:
 
 
 class ImageStreamer:
-    def __init__(self, topics, hz, width, quality):
-        self.topics = topics
+    def __init__(self, topics, compressed_topics, hz, width, quality):
+        self.raw_topics = topics
+        self.compressed_topics = compressed_topics
+        # Prefer the camera driver's already resized JPEG stream. This avoids
+        # decoding, resizing and re-encoding 30 full-resolution frames each
+        # second in this bridge process.
+        self.topics = compressed_topics + topics
         self.min_period = 1.0 / max(hz, 0.1)
         self.width = max(160, width)
         self.quality = max(35, min(95, quality))
@@ -30,12 +35,14 @@ class ImageStreamer:
         self.emit_credit = 1.0
         self.active_topic = ""
         self.counts = {}
-        self.last_rates = time.time()
+        self.last_rates = None
         self.started = time.time()
         self.last_image = 0.0
         self.last_warn = 0.0
         self.last_exposure_us = None
         self.last_frame_info = 0.0
+        self.raw_subscribers = []
+        self.raw_fallback_started = False
 
     def write(self, obj):
         sys.stdout.write(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -43,16 +50,20 @@ class ImageStreamer:
 
     def tick(self, topic):
         now = time.time()
-        bucket = self.counts.setdefault(topic, {"count": 0, "last": now, "hz": 0.0})
+        bucket = self.counts.setdefault(topic, {"count": 0, "last": now})
         bucket["count"] += 1
-        elapsed = now - bucket["last"]
-        if elapsed >= 1.0:
-            bucket["hz"] = bucket["count"] / elapsed
-            bucket["count"] = 0
-            bucket["last"] = now
-        if now - self.last_rates >= 1.0:
+        if self.last_rates is None:
             self.last_rates = now
-            self.write({"type": "rates", "rates": {k: round(v["hz"], 2) for k, v in self.counts.items()}})
+            return
+        if now - self.last_rates >= 1.0:
+            rates = {}
+            for key, value in self.counts.items():
+                elapsed = max(0.001, now - value["last"])
+                rates[key] = round(value["count"] / elapsed, 2)
+                value["count"] = 0
+                value["last"] = now
+            self.last_rates = now
+            self.write({"type": "rates", "rates": rates})
 
     def should_emit(self, topic):
         now = time.time()
@@ -119,36 +130,84 @@ class ImageStreamer:
         except Exception as exc:
             self.write({"type": "status", "level": "warn", "message": str(exc), "topic": topic})
 
+    def compressed_image_cb(self, topic, msg):
+        self.tick(topic)
+        if not self.should_emit(topic):
+            return
+        try:
+            self.last_image = time.time()
+            payload = {
+                "type": "image",
+                "topic": topic,
+                "frame": getattr(msg.header, "frame_id", ""),
+                "stamp": time.time(),
+                "width": self.width,
+                "height": 0,
+                "encoding": "jpeg",
+                "data": base64.b64encode(bytes(msg.data)).decode("ascii"),
+            }
+            if self.last_exposure_us is not None and time.time() - self.last_frame_info <= 2.0:
+                payload["exposure_us"] = round(self.last_exposure_us, 3)
+            self.write(payload)
+        except Exception as exc:
+            self.write({"type": "status", "level": "warn", "message": str(exc), "topic": topic})
+
     def frame_info_cb(self, msg):
         match = re.search(r"(?:^|\s)exposure_us=([0-9]+(?:\.[0-9]+)?)", msg.data or "")
         if match:
             self.last_exposure_us = float(match.group(1))
             self.last_frame_info = time.time()
 
+    def record_frame_info_cb(self, _msg):
+        # Count the saved native stream without subscribing to and copying the
+        # 15 MB raw image solely for a health-rate display.
+        self.tick("/left_camera/image")
+
     def subscribe(self):
         self.write({"type": "status", "level": "info", "message": "ROS image stream connected", "topics": self.topics})
-        for topic in self.topics:
-            rospy.Subscriber(topic, Image, lambda msg, t=topic: self.image_cb(t, msg), queue_size=1)
+        for topic in self.compressed_topics:
+            rospy.Subscriber(topic, CompressedImage, lambda msg, t=topic: self.compressed_image_cb(t, msg), queue_size=1)
         rospy.Subscriber("/hikrobot_camera/frame_info", String, self.frame_info_cb, queue_size=5)
+        rospy.Subscriber("/hikrobot_camera/record_frame_info", String, self.record_frame_info_cb, queue_size=10)
+        if not self.compressed_topics:
+            self.subscribe_raw_fallback()
+
+    def subscribe_raw_fallback(self):
+        if self.raw_fallback_started:
+            return
+        self.raw_fallback_started = True
+        for topic in self.raw_topics:
+            self.raw_subscribers.append(
+                rospy.Subscriber(topic, Image, lambda msg, t=topic: self.image_cb(t, msg), queue_size=1)
+            )
 
     def heartbeat(self):
         now = time.time()
+        if self.last_image <= 0 and not self.raw_fallback_started and now - self.started > 2.0:
+            self.write({
+                "type": "status",
+                "level": "info",
+                "message": "压缩预览流未就绪，启用原始图像兼容回退",
+            })
+            self.subscribe_raw_fallback()
         if self.last_image <= 0 and now - self.started > 3.0 and now - self.last_warn > 3.0:
             self.last_warn = now
-            self.write({"type": "status", "level": "warn", "message": "图像 topic 暂无帧，请确认相机已启动并在发布 /left_camera/image 或 /rgb_img"})
+            self.write({"type": "status", "level": "warn", "message": "图像 topic 暂无帧，请确认相机已启动并在发布预览流或 /left_camera/image"})
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--topics", default="/left_camera/image,/rgb_img")
+    parser.add_argument("--compressed-topics", default="/hikrobot_camera/preview/compressed")
     parser.add_argument("--hz", type=float, default=5.0)
     parser.add_argument("--width", type=int, default=560)
     parser.add_argument("--quality", type=int, default=72)
     args = parser.parse_args()
 
     topics = [topic.strip() for topic in args.topics.split(",") if topic.strip()]
+    compressed_topics = [topic.strip() for topic in args.compressed_topics.split(",") if topic.strip()]
     rospy.init_node("fast_livo2_console_image_stream", anonymous=True, disable_signals=True)
-    streamer = ImageStreamer(topics, args.hz, args.width, args.quality)
+    streamer = ImageStreamer(topics, compressed_topics, args.hz, args.width, args.quality)
     streamer.subscribe()
     rate = rospy.Rate(2)
     while not rospy.is_shutdown():

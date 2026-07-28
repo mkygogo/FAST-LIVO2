@@ -1,0 +1,210 @@
+--- a/src/hikrobot_camera.cpp
++++ b/src/hikrobot_camera.cpp
+@@ -1,11 +1,13 @@
+ #include <iostream>
+ #include "opencv2/opencv.hpp"
+ #include <vector>
++#include <cmath>
+ #include <ros/ros.h>
+ #include <sstream>
+ #include <cv_bridge/cv_bridge.h>
+ #include <image_transport/image_transport.h>
+ #include <camera_info_manager/camera_info_manager.h>
++#include <sensor_msgs/CompressedImage.h>
+ #include <std_msgs/String.h>
+ #include "hikrobot_camera.hpp"
+ 
+@@ -30,24 +32,51 @@
+     //********** rosnode init **********/
+     ros::init(argc, argv, "hikrobot_camera");
+     ros::NodeHandle hikrobot_camera;
++    ros::NodeHandle private_nh("~");
+     camera::Camera MVS_cap(hikrobot_camera);
+     //********** rosnode init **********/
+     image_transport::ImageTransport main_cam_image(hikrobot_camera);
+-    image_transport::CameraPublisher image_pub = main_cam_image.advertiseCamera("/hikrobot_camera/rgb", 1000);
+-    ros::Publisher frame_info_pub = hikrobot_camera.advertise<std_msgs::String>("/hikrobot_camera/frame_info", 1000);
++    bool dual_stream_mode = false;
++    double preview_frame_rate = 30.0;
++    double record_frame_rate = 10.0;
++    int preview_width = 960;
++    int preview_jpeg_quality = 70;
++    std::string record_image_topic = "/left_camera/image";
++    std::string preview_compressed_topic = "/hikrobot_camera/preview/compressed";
++    private_nh.param("DualStreamMode", dual_stream_mode, false);
++    private_nh.param("PreviewFrameRate", preview_frame_rate, 30.0);
++    private_nh.param("RecordFrameRate", record_frame_rate, 10.0);
++    private_nh.param("PreviewWidth", preview_width, 960);
++    private_nh.param("PreviewJpegQuality", preview_jpeg_quality, 70);
++    private_nh.param<std::string>("RecordImageTopic", record_image_topic, "/left_camera/image");
++    private_nh.param<std::string>("PreviewCompressedTopic", preview_compressed_topic, "/hikrobot_camera/preview/compressed");
++    preview_frame_rate = std::max(1.0, preview_frame_rate);
++    record_frame_rate = std::max(1.0, std::min(record_frame_rate, preview_frame_rate));
++    preview_width = std::max(320, preview_width);
++    preview_jpeg_quality = std::max(35, std::min(preview_jpeg_quality, 90));
++
++    image_transport::CameraPublisher image_pub = main_cam_image.advertiseCamera("/hikrobot_camera/rgb", 2);
++    image_transport::CameraPublisher record_image_pub = main_cam_image.advertiseCamera(record_image_topic, 2);
++    ros::Publisher preview_pub = hikrobot_camera.advertise<sensor_msgs::CompressedImage>(preview_compressed_topic, 2);
++    ros::Publisher frame_info_pub = hikrobot_camera.advertise<std_msgs::String>("/hikrobot_camera/frame_info", 30);
+ 
+     sensor_msgs::Image image_msg;
+     sensor_msgs::CameraInfo camera_info_msg;
+     cv_bridge::CvImagePtr cv_ptr = boost::make_shared<cv_bridge::CvImage>();
+     cv_ptr->encoding = sensor_msgs::image_encodings::BGR8;  // 就是rgb格式
+
+-    //********** 10 Hz        **********/
+-    ros::Rate loop_rate(10);
++    // Poll faster than the camera acquisition rate. ReadImg() returns only a
++    // newly captured frame, so this does not duplicate images.
++    ros::Rate loop_rate(std::max(30.0, preview_frame_rate * 2.0));
++    const double record_period = 1.0 / record_frame_rate;
++    double next_record_stamp = 0.0;
++    std::vector<int> jpeg_params;
++    jpeg_params.push_back(cv::IMWRITE_JPEG_QUALITY);
++    jpeg_params.push_back(preview_jpeg_quality);
+ 
+     while (ros::ok())
+     {
+ 
+-        loop_rate.sleep();
+         ros::spinOnce();
+ 
+         MVS_cap.ReadImg(src, frame_meta);
+@@ -59,9 +88,6 @@
+         cv::Rect area(FIT_min_x,FIT_min_y,FIT_max_x-FIT_min_x,FIT_max_y-FIT_min_y); // cut区域：从左上角像素坐标x，y，宽，高
+         cv::Mat src_new = src(area);
+         cv_ptr->image = src_new;
+-#else
+-        cv_ptr->image = src;
+-#endif
+         image_msg = *(cv_ptr->toImageMsg());
+         if (frame_meta.valid && frame_meta.host_timestamp > 0)
+         {
+@@ -78,6 +104,81 @@
+         camera_info_msg.header.frame_id = image_msg.header.frame_id;
+ 	    camera_info_msg.header.stamp = image_msg.header.stamp;
+         image_pub.publish(image_msg, camera_info_msg);
++#else
++        ros::Time frame_stamp;
++        if (frame_meta.valid && frame_meta.host_timestamp > 0)
++        {
++            const int64_t host_sec = frame_meta.host_timestamp / 1000;
++            const int64_t host_nsec = (frame_meta.host_timestamp % 1000) * 1000000;
++            frame_stamp = ros::Time(host_sec, host_nsec);
++        }
++        else
++        {
++            frame_stamp = ros::Time::now();
++        }
++
++        if (dual_stream_mode)
++        {
++            cv::Mat preview;
++            const double preview_scale = std::min(1.0, preview_width / static_cast<double>(src.cols));
++            if (preview_scale < 1.0)
++            {
++                cv::resize(
++                    src,
++                    preview,
++                    cv::Size(
++                        preview_width,
++                        std::max(1, static_cast<int>(std::lround(src.rows * preview_scale)))
++                    ),
++                    0,
++                    0,
++                    cv::INTER_AREA
++                );
++            }
++            else
++            {
++                preview = src;
++            }
++            sensor_msgs::CompressedImage preview_msg;
++            preview_msg.header.stamp = frame_stamp;
++            preview_msg.header.frame_id = "hikrobot_camera";
++            preview_msg.format = "jpeg";
++            cv::imencode(".jpg", preview, preview_msg.data, jpeg_params);
++            preview_pub.publish(preview_msg);
++
++            const double frame_time = frame_stamp.toSec();
++            if (next_record_stamp <= 0.0 || frame_time + 1e-6 >= next_record_stamp)
++            {
++                cv_ptr->image = src;
++                image_msg = *(cv_ptr->toImageMsg());
++                image_msg.header.stamp = frame_stamp;
++                image_msg.header.frame_id = "hikrobot_camera";
++                camera_info_msg.header = image_msg.header;
++                record_image_pub.publish(image_msg, camera_info_msg);
++                if (next_record_stamp <= 0.0)
++                {
++                    next_record_stamp = frame_time + record_period;
++                }
++                else
++                {
++                    do
++                    {
++                        next_record_stamp += record_period;
++                    }
++                    while (next_record_stamp <= frame_time);
++                }
++            }
++        }
++        else
++        {
++            cv_ptr->image = src;
++            image_msg = *(cv_ptr->toImageMsg());
++            image_msg.header.stamp = frame_stamp;
++            image_msg.header.frame_id = "hikrobot_camera";
++            camera_info_msg.header = image_msg.header;
++            image_pub.publish(image_msg, camera_info_msg);
++        }
++#endif
+ 
+         if (frame_meta.valid)
+         {
+@@ -96,6 +197,7 @@
+         }
+ 
+         //*******************************************************************************************************************/
++        loop_rate.sleep();
+     }
+     return 0;
+ }
+--- a/include/hikrobot_camera.hpp
++++ b/include/hikrobot_camera.hpp
+@@ -202,14 +202,16 @@
+         }
+ 
+         //设置 yaml 文件里面的配置
+-        this->set(CAP_PROP_FRAMERATE_ENABLE, FrameRateEnable);
+-        if (FrameRateEnable)
+-            this->set(CAP_PROP_FRAMERATE, FrameRate);
+-        // this->set(CAP_PROP_BURSTFRAMECOUNT, BurstFrameCount);
+         this->set(CAP_PROP_HEIGHT, height);
+         this->set(CAP_PROP_WIDTH, width);
+         this->set(CAP_PROP_OFFSETX, Offset_x);
+         this->set(CAP_PROP_OFFSETY, Offset_y);
++        // Configure ROI before frame rate because the device's permitted
++        // acquisition rate depends on the active sensor dimensions.
++        this->set(CAP_PROP_FRAMERATE_ENABLE, FrameRateEnable);
++        if (FrameRateEnable)
++            this->set(CAP_PROP_FRAMERATE, FrameRate);
++        // this->set(CAP_PROP_BURSTFRAMECOUNT, BurstFrameCount);
+         configureExposure();
+         // printf("\n%d\n",GammaEnable);
+         this->set(CAP_PROP_GAMMA_ENABLE, GammaEnable);
+@@ -824,10 +826,10 @@
+             image_empty_count = 0; //空图帧数
+             //转换图像格式为BGR8
+ 
+-            stConvertParam.nWidth = 3072;                               //ch:图像宽 | en:image width
+-            stConvertParam.nHeight = 2048;                              //ch:图像高 | en:image height
++            stConvertParam.nWidth = stImageInfo.nWidth;                 //ch:图像宽 | en:image width
++            stConvertParam.nHeight = stImageInfo.nHeight;               //ch:图像高 | en:image height
+             stConvertParam.pSrcData = m_pBufForDriver;                  //ch:输入数据缓存 | en:input data buffer
+-            stConvertParam.nSrcDataLen = MAX_IMAGE_DATA_SIZE;           //ch:输入数据大小 | en:input data size
++            stConvertParam.nSrcDataLen = stImageInfo.nFrameLen;         //ch:输入数据大小 | en:input data size
+             stConvertParam.enDstPixelType = PixelType_Gvsp_BGR8_Packed; //ch:输出像素格式 | en:output pixel format                      //! 输出格式 RGB
+             stConvertParam.pDstBuffer = m_pBufForSaveImage;             //ch:输出数据缓存 | en:output data buffer
+             stConvertParam.nDstBufferSize = MAX_IMAGE_DATA_SIZE;        //ch:输出缓存大小 | en:output buffer size

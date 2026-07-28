@@ -183,21 +183,52 @@ def action_stop_scan_runtime():
 def docker_sigint_wait(name, timeout=75):
     if name not in docker_all_names():
         return {"ok": True, "stopped": [], "output": f"{name} not running"}
-    # Send SIGINT to roslaunch inside the container.  With "docker compose run
-    # -T" PID 1 is bash which does not forward signals to children.  The
-    # compose file uses "pid: host" so we must NOT use "kill -INT -1" (that
-    # would signal every process on the host).  Instead target roslaunch which
-    # will gracefully shut down all ROS nodes (allowing savePCD to complete).
-    signal_res = run_cmd(
-        ["docker", "exec", name, "bash", "-c",
-         "pkill -INT -f roslaunch 2>/dev/null; "
-         "pkill -INT -f fastlivo_mapping 2>/dev/null; "
-         "pkill -INT -f 'rosbag record' 2>/dev/null; "
-         "pkill -INT -f 'rosbag play' 2>/dev/null; "
-         "exit 0"],
-        timeout=8,
-        cwd=DEPLOY_DIR,
+    # Send SIGINT to the real ROS executables inside the container.  With
+    # "docker compose run -T" PID 1 is bash which does not forward signals to
+    # children.  The compose file uses "pid: host" so we must NOT use
+    # "kill -INT -1" (that would signal every process on the host).
+    #
+    # rosbag's Python CLI starts a separate C++ executable at
+    # .../lib/rosbag/record (or play).  Matching "rosbag record" only signals
+    # the wrapper and has proved unreliable, leaving large .bag.active files
+    # until the container is force-removed.
+    #
+    # Because pid:host exposes every host process inside the container, pkill
+    # would also stop roslaunch processes belonging to the camera and LiDAR
+    # containers.  Resolve PIDs with `docker top` so only processes belonging
+    # to the requested container receive SIGINT.
+    top_res = run_cmd(["docker", "top", name, "-eo", "pid,args"], timeout=5, cwd=DEPLOY_DIR)
+    target_patterns = (
+        re.compile(r"/roslaunch(?:\s|$)"),
+        re.compile(r"/fastlivo_mapping(?:\s|$)"),
+        re.compile(r"/rosbag/record(?:\s|$)"),
+        re.compile(r"/rosbag/play(?:\s|$)"),
     )
+    target_pids = []
+    target_commands = []
+    if top_res.get("ok"):
+        for line in top_res.get("output", "").splitlines()[1:]:
+            parts = line.strip().split(None, 1)
+            if len(parts) != 2 or not parts[0].isdigit():
+                continue
+            if any(pattern.search(parts[1]) for pattern in target_patterns):
+                target_pids.append(parts[0])
+                target_commands.append(parts[1])
+    if target_pids:
+        signal_res = run_cmd(
+            ["docker", "exec", name, "bash", "-c", 'kill -INT "$@"', "bash", *target_pids],
+            timeout=8,
+            cwd=DEPLOY_DIR,
+        )
+        signal_res["target_pids"] = target_pids
+        signal_res["target_commands"] = target_commands
+    else:
+        signal_res = {
+            "ok": False,
+            "code": 1,
+            "output": f"no graceful-stop process found in {name}",
+            "top": top_res,
+        }
     deadline = time.time() + timeout
     while time.time() < deadline:
         if name not in {row["name"] for row in docker_ps()}:
@@ -1442,6 +1473,14 @@ def action_camera_start():
     running = container_running(CONTAINERS["camera"])
     if running:
         return {"ok": True, "message": "Hikrobot camera already running", "running": running}
+    usb = run_cmd(["lsusb", "-d", "2bdf:0001"], timeout=5)
+    if not usb.get("ok") or "2bdf:0001" not in usb.get("output", "").lower():
+        return {
+            "ok": False,
+            "message": "未检测到 Hikrobot 相机 USB（2bdf:0001），请重新插拔相机 USB 线或给相机重新上电",
+            "output": usb.get("output", ""),
+            "camera_usb_connected": False,
+        }
     cmd = named_ros_env_cmd(
         "hikrobot_camera",
         "roslaunch jr_fastlivo_validation hikrobot_camera_continuous.launch",
@@ -1458,6 +1497,16 @@ def prepare_scan_camera():
     params.update({
         "ExposureAutoString": "Once",
         "AutoExposureTimeLowerLimit": 100,
+        # Capture at up to 25 FPS for the low-resolution operator preview. The
+        # camera reached this rate with the normal 27 ms indoor exposure; a
+        # 25 FPS cap also leaves more margin on the USB link than 30 FPS.
+        # /left_camera/image is independently timestamp-sampled at 10 FPS.
+        "AutoExposureTimeUpperLimit": min(
+            float(params.get("AutoExposureTimeUpperLimit") or 30000),
+            30000,
+        ),
+        "FrameRateEnable": True,
+        "FrameRate": 25,
         "GainAuto": 0,
     })
     params, _ = normalize_camera_params(params)
@@ -1556,6 +1605,13 @@ def action_fastlivo_record_start():
         mode = active_workflow()
         if mode != "idle":
             return {"ok": False, "message": f"当前正在执行 {mode}，不能开始录制"}
+        camera_usb = run_cmd(["lsusb", "-d", "2bdf:0001"], timeout=5)
+        if not camera_usb.get("ok") or "2bdf:0001" not in camera_usb.get("output", "").lower():
+            return {
+                "ok": False,
+                "message": "未检测到 Hikrobot 相机 USB，请重新插拔相机 USB 线或给相机重新上电后再录制",
+                "camera_usb_connected": False,
+            }
         free = filesystem_free_bytes()
         if free < RECORD_MIN_START_FREE:
             return {"ok": False, "message": f"磁盘可用空间不足15 GiB，当前 {free / GIB:.1f} GiB"}
@@ -1568,6 +1624,12 @@ def action_fastlivo_record_start():
             "status": "starting", "started_at": time.strftime("%Y-%m-%d %H:%M:%S"), "bag": str(bag),
         })
         action_lio_stop()
+        # A camera/debug preview may currently own the shared ROS master.  If
+        # LiDAR joins that master and prepare_scan_camera() then restarts the
+        # camera, the LiDAR node remains alive but orphaned from the new master.
+        # Start both devices from a clean state so the LiDAR container owns the
+        # master for the entire recording.
+        device_reset = docker_rm(CONTAINERS["camera"] + CONTAINERS["lidar"])
         lidar = action_lidar_start()
         lidar_ready = wait_for_lidar_ready() if lidar.get("ok") else {"ok": False}
         camera = prepare_scan_camera()
@@ -1591,7 +1653,11 @@ def action_fastlivo_record_start():
         write_active_recording(active)
         update_scan_workflow(scan_dir, "recording", {"status": "recording", "log": bag_res.get("log")})
         threading.Thread(target=recording_watchdog, args=(stamp,), daemon=True).start()
-        return {"ok": True, "scan_id": stamp, "scan_dir": str(scan_dir), "bag": str(bag), "lidar": lidar, "lidar_ready": lidar_ready, "camera": camera, "camera_ready": camera_ready}
+        return {
+            "ok": True, "scan_id": stamp, "scan_dir": str(scan_dir), "bag": str(bag),
+            "device_reset": device_reset, "lidar": lidar, "lidar_ready": lidar_ready,
+            "camera": camera, "camera_ready": camera_ready,
+        }
 
 
 def action_fastlivo_record_stop(reason="operator"):
@@ -1993,7 +2059,15 @@ def action_fastlivo_start_all():
     mode = active_workflow()
     if mode not in ("idle", "realtime_mapping"):
         return {"ok": False, "message": f"当前正在执行 {mode}，不能开始实时建图"}
+    camera_usb = run_cmd(["lsusb", "-d", "2bdf:0001"], timeout=5)
+    if not camera_usb.get("ok") or "2bdf:0001" not in camera_usb.get("output", "").lower():
+        return {
+            "ok": False,
+            "message": "未检测到 Hikrobot 相机 USB，请重新插拔相机 USB 线或给相机重新上电后再建图",
+            "camera_usb_connected": False,
+        }
     lio_stop = action_lio_stop()
+    device_reset = docker_rm(CONTAINERS["camera"] + CONTAINERS["lidar"])
     lidar = action_lidar_start()
     lidar_ready = wait_for_lidar_ready() if lidar.get("ok") else {"ok": False}
     camera_result = prepare_scan_camera()
@@ -2004,13 +2078,15 @@ def action_fastlivo_start_all():
         action_stop_scan_runtime()
         return {
             "ok": False, "message": "相机或雷达未能稳定出帧，实时建图未启动",
-            "lio_stop": lio_stop, "lidar": lidar, "lidar_ready": lidar_ready,
+            "lio_stop": lio_stop, "device_reset": device_reset,
+            "lidar": lidar, "lidar_ready": lidar_ready,
             "camera_stop": camera_stop, "camera": camera, "camera_ready": camera_ready,
         }
     mapping = action_fastlivo_start()
     return {
         "ok": bool(lidar.get("ok") and camera.get("ok") and mapping.get("ok")),
         "lio_stop": lio_stop,
+        "device_reset": device_reset,
         "lidar": lidar,
         "lidar_ready": lidar_ready,
         "camera_stop": camera_stop,
@@ -2200,11 +2276,40 @@ async def ws_send(writer, obj):
     await writer.drain()
 
 
+async def ws_send_binary(writer, payload):
+    if writer.is_closing():
+        return
+    header = bytearray([0x82])
+    length = len(payload)
+    if length < 126:
+        header.append(length)
+    elif length < 65536:
+        header.extend([126, (length >> 8) & 255, length & 255])
+    else:
+        header.extend([127])
+        header.extend(length.to_bytes(8, "big"))
+    writer.write(bytes(header) + payload)
+    await writer.drain()
+
+
+async def ws_send_camera_frame(writer, obj):
+    encoded = obj.get("data") or obj.get("jpeg_b64") or obj.get("jpeg") or ""
+    jpeg = base64.b64decode(encoded)
+    metadata = {key: value for key, value in obj.items() if key not in ("data", "jpeg_b64", "jpeg")}
+    metadata_bytes = json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    payload = len(metadata_bytes).to_bytes(4, "big") + metadata_bytes + jpeg
+    await ws_send_binary(writer, payload)
+
+
 async def stream_points(writer, mode, quality):
     ensure_dirs()
-    safe_mode = mode if mode in ("lidar", "mapping") else "lidar"
+    safe_mode = mode if mode in ("health", "lidar", "mapping") else "health"
     safe_quality = quality if quality in ("mini", "pc") else "mini"
-    if safe_mode == "lidar":
+    if safe_mode == "health":
+        max_points = "1"
+        hz = "2"
+        voxel_size = "0.00"
+    elif safe_mode == "lidar":
         max_points = "12000" if safe_quality == "mini" else "28000"
         hz = "4"
         voxel_size = "0.00"
@@ -2217,13 +2322,13 @@ async def stream_points(writer, mode, quality):
         f"--mode {safe_mode} --max-points {max_points} --hz {hz} --voxel-size {voxel_size}"
     )
     current = {row["name"] for row in docker_ps()}
-    candidates = CONTAINERS["lidar"] if safe_mode == "lidar" else CONTAINERS["fusion"] + CONTAINERS["lio"] + CONTAINERS["lidar"]
+    candidates = CONTAINERS["lidar"] if safe_mode in ("health", "lidar") else CONTAINERS["fusion"] + CONTAINERS["lio"] + CONTAINERS["lidar"]
     container_name = next((name for name in candidates if name in current), None)
     if not container_name:
         await ws_send(writer, {
             "type": "status",
             "level": "warn",
-            "message": "请先启动雷达驱动" if safe_mode == "lidar" else "请先启动雷达建图",
+            "message": "请先启动雷达驱动" if safe_mode in ("health", "lidar") else "请先启动雷达建图",
         })
         return
     cmd = docker_exec_ros_cmd(container_name, inner)
@@ -2275,16 +2380,18 @@ async def stream_points(writer, mode, quality):
 async def stream_camera(writer, quality, profile="default"):
     ensure_dirs()
     safe_quality = quality if quality in ("mini", "pc") else "mini"
-    # The native camera stream is 2448x2048. Downscale only the browser preview
-    # to control JPEG/WebSocket load; ROS mapping and saved images stay native.
+    # Production camera launch publishes an already resized JPEG preview at
+    # 30 FPS and an independent native 10 FPS /left_camera/image stream.
+    # ros_image_stream passes the compressed preview through without decoding.
     if profile == "recording":
-        width, hz, jpeg_quality = "960", "8", "75"
+        width, hz, jpeg_quality = "960", "30", "70"
     else:
-        width = "1280"
-        hz = "5" if safe_quality == "mini" else "8"
-        jpeg_quality = "78" if safe_quality == "mini" else "84"
+        width = "960" if safe_quality == "mini" else "1280"
+        hz = "20" if safe_quality == "mini" else "30"
+        jpeg_quality = "70" if safe_quality == "mini" else "78"
     inner = (
         "python3 /home/jr/fast_livo2_data/tools/ros_image_stream.py "
+        "--compressed-topics /hikrobot_camera/preview/compressed "
         f"--topics /left_camera/image,/rgb_img --hz {hz} --width {width} --quality {jpeg_quality}"
     )
     current = {row["name"] for row in docker_ps()}
@@ -2324,9 +2431,10 @@ async def stream_camera(writer, quality, profile="default"):
                         if obj.get("type") == "image":
                             logged = {k: v for k, v in obj.items() if k != "data"}
                             fh.write((json.dumps(logged, ensure_ascii=False) + "\n").encode("utf-8"))
+                            await ws_send_camera_frame(writer, obj)
                         else:
                             fh.write(line)
-                        await ws_send(writer, obj)
+                            await ws_send(writer, obj)
                     except Exception:
                         fh.write((text[-1000:] + "\n").encode("utf-8"))
                         await ws_send(writer, {"type": "log", "message": text[-1000:]})
@@ -2428,7 +2536,11 @@ async def handle_http(reader, writer):
 
     try:
         if clean_path == "/api/status" and method == "GET":
-            json_response(writer, api_status())
+            # api_status() shells out to Docker, ping, ip and rostopic. Running
+            # it on the asyncio thread used to pause camera/point WebSockets
+            # for about one second on every five-second browser status poll.
+            # Keep the event loop available for live preview traffic.
+            json_response(writer, await asyncio.to_thread(api_status))
         elif clean_path == "/api/fastlivo/maps" and method == "GET":
             json_response(writer, list_fastlivo_maps())
         elif clean_path == "/api/fastlivo/scans" and method == "GET":
