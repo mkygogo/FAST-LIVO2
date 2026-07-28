@@ -9,12 +9,12 @@ common:
 extrin_calib:
   extrinsic_T: [0.04165, 0.02326, -0.0284]
   extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
-  # MV-CS050-10UC + 8 mm lens, FAST-Calib2 three-scene solve 2026-07-21.
-  # Scenes: front / left-oblique / right-oblique; joint RMSE: 0.0101 m.
-  Rcl: [-0.033197, -0.999442, -0.003736,
-         0.462138, -0.012036, -0.886726,
-         0.886186, -0.031163,  0.462280]
-  Pcl: [0.008916, -0.097054, -0.001478]
+  # MV-CS050-10UC + 8 mm lens, FAST-Calib2 three-scene solve 2026-07-27.
+  # Scenes: left-oblique / front / right-oblique; joint RMSE: 0.0024 m.
+  Rcl: [-0.022596, -0.999744,  0.001213,
+         0.371757, -0.009528, -0.928281,
+         0.928055, -0.020525,  0.371877]
+  Pcl: [-0.003881, -0.087386, 0.002496]
 
 time_offset:
   imu_time_offset: 0.0

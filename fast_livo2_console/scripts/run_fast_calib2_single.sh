@@ -45,7 +45,31 @@ container_running() {
 valid_dataset() {
   local dir="$1"
   [[ -f "${dir}/image.png" && -f "${dir}/scene.bag" && \
-     -f "${dir}/camera_intrinsics_fast_calib2.yaml" ]]
+     -f "${dir}/camera_intrinsics_fast_calib2.yaml" ]] || return 1
+
+  # New recordings contain an immediate LiDAR four-circle validation result.
+  # Keep legacy datasets without this field compatible, but never select a
+  # dataset that the recording UI explicitly marked invalid.
+  [[ ! -f "${dir}/metadata.json" ]] || python3 - "${dir}/metadata.json" <<'PY'
+import json
+import sys
+
+try:
+    metadata = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    raise SystemExit(1)
+
+validation = metadata.get("lidar_validation")
+if not isinstance(validation, dict):
+    raise SystemExit(0)
+
+valid = (
+    metadata.get("status") == "complete"
+    and validation.get("status") == "passed"
+    and validation.get("center_count") == 4
+)
+raise SystemExit(0 if valid else 1)
+PY
 }
 
 latest_dataset() {

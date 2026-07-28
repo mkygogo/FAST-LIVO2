@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -43,6 +44,11 @@ class PreviewRecorder:
         self.record_started = 0.0
         self.record_finished = False
         self.record_error = ""
+        self.lidar_validation_status = "idle"
+        self.lidar_validation_complete = False
+        self.lidar_center_count = None
+        self.lidar_validation_message = ""
+        self.lidar_validation_thread = None
         self.force_until = 0.0
         self.exit_requested = False
         self.aruco_dictionary = cv2.aruco.Dictionary_get(cv2.aruco.DICT_6X6_250)
@@ -73,6 +79,10 @@ class PreviewRecorder:
     def start_recording(self, image):
         if self.record_process is not None or self.record_finished:
             return
+        self.lidar_validation_status = "idle"
+        self.lidar_validation_complete = False
+        self.lidar_center_count = None
+        self.lidar_validation_message = ""
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         self.scene_dir = os.path.join(
             self.args.data_root, "datasets", "%s-scene-%s" % (timestamp, timestamp)
@@ -122,10 +132,121 @@ class PreviewRecorder:
             "image": image_path,
             "bag": bag_path,
             "intrinsics": intrinsics_path if os.path.isfile(intrinsics_path) else "",
+            "lidar_validation": {
+                "status": self.lidar_validation_status,
+                "center_count": self.lidar_center_count,
+                "message": self.lidar_validation_message,
+                "log": (
+                    os.path.join(self.scene_dir, "lidar_validation", "validation.log")
+                    if self.scene_dir else ""
+                ),
+            },
         }
         with open(os.path.join(self.scene_dir, "metadata.json"), "w") as output:
             json.dump(metadata, output, ensure_ascii=False, indent=2)
             output.write("\n")
+
+    def start_lidar_validation(self):
+        if self.lidar_validation_status != "idle" or not self.scene_dir:
+            return
+        self.lidar_validation_status = "running"
+        bag_path = os.path.join(self.scene_dir, "scene.bag")
+        image_path = os.path.join(self.scene_dir, "image.png")
+        intrinsics_path = os.path.join(
+            self.scene_dir, "camera_intrinsics_fast_calib2.yaml"
+        )
+        topics = [self.args.image_topic, self.args.lidar_topic, self.args.imu_topic]
+        if self.args.frame_info_topic in self.published_topics():
+            topics.append(self.args.frame_info_topic)
+        self.write_metadata(
+            topics, bag_path, image_path, intrinsics_path, "validating_lidar"
+        )
+
+        def worker():
+            validation_dir = os.path.join(self.scene_dir, "lidar_validation")
+            os.makedirs(validation_dir, exist_ok=True)
+            log_path = os.path.join(validation_dir, "validation.log")
+            output_text = ""
+            try:
+                if not os.path.isfile(self.args.lidar_validator_config):
+                    raise RuntimeError(
+                        "validator config missing: %s" % self.args.lidar_validator_config
+                    )
+                subprocess.run(
+                    ["rosparam", "load", self.args.lidar_validator_config],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=8,
+                )
+                subprocess.run(
+                    ["rosparam", "set", "output_path", validation_dir],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=5,
+                )
+                result = subprocess.run(
+                    [
+                        "rosrun", "fast_calib", "lidar_center_test",
+                        bag_path, self.args.lidar_topic, "solid",
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=self.args.lidar_validator_timeout,
+                )
+                output_text = result.stdout or ""
+                match = re.search(
+                    r"\[LiDAR Test\] Raw center count:\s*(\d+)", output_text
+                )
+                self.lidar_center_count = int(match.group(1)) if match else None
+                candidate_match = re.search(
+                    r"Unable to select 4 geometry-consistent annulus centers "
+                    r"from\s+(\d+)\s+candidates",
+                    output_text,
+                )
+                if (self.lidar_center_count in (None, 0)
+                        and candidate_match is not None):
+                    self.lidar_center_count = int(candidate_match.group(1))
+                if result.returncode == 0 and self.lidar_center_count == 4:
+                    self.lidar_validation_status = "passed"
+                    self.lidar_validation_message = "four circles detected"
+                    metadata_status = "complete"
+                else:
+                    self.lidar_validation_status = "failed"
+                    if self.lidar_center_count is None:
+                        self.lidar_validation_message = "circle detection failed"
+                    else:
+                        self.lidar_validation_message = "%d of 4 circles detected" % (
+                            self.lidar_center_count
+                        )
+                    metadata_status = "invalid_lidar"
+            except subprocess.TimeoutExpired as exc:
+                partial_output = exc.stdout or ""
+                if isinstance(partial_output, bytes):
+                    partial_output = partial_output.decode("utf-8", errors="replace")
+                output_text = partial_output + "\nLiDAR validation timed out\n"
+                self.lidar_validation_status = "error"
+                self.lidar_validation_message = "validation timed out"
+                metadata_status = "validation_error"
+            except Exception as exc:
+                output_text += "\nLiDAR validation error: %s\n" % exc
+                self.lidar_validation_status = "error"
+                self.lidar_validation_message = str(exc)
+                metadata_status = "validation_error"
+
+            with open(log_path, "w") as output:
+                output.write(output_text)
+            self.write_metadata(
+                topics, bag_path, image_path, intrinsics_path, metadata_status
+            )
+            self.lidar_validation_complete = True
+
+        self.lidar_validation_thread = threading.Thread(target=worker, daemon=True)
+        self.lidar_validation_thread.start()
 
     def finish_recording(self):
         if self.record_process is None:
@@ -144,11 +265,24 @@ class PreviewRecorder:
         intrinsics_path = os.path.join(self.scene_dir, "camera_intrinsics_fast_calib2.yaml")
         if return_code == 0 and os.path.isfile(bag_path) and os.path.getsize(bag_path) > 1024 * 1024:
             self.record_finished = True
-            self.write_metadata(topics, bag_path, image_path, intrinsics_path, "complete")
+            self.start_lidar_validation()
         else:
             self.record_error = "rosbag failed (code %s)" % return_code
             self.write_metadata(topics, bag_path, image_path, intrinsics_path, "failed")
         self.record_process = None
+
+    def reset_after_failed_validation(self):
+        self.record_process = None
+        self.record_finished = False
+        self.record_error = ""
+        self.scene_dir = None
+        self.record_started = 0.0
+        self.lidar_validation_status = "idle"
+        self.lidar_validation_complete = False
+        self.lidar_center_count = None
+        self.lidar_validation_message = ""
+        self.lidar_validation_thread = None
+        self.force_until = 0.0
 
     def cancel_recording(self):
         if self.record_process is not None and self.record_process.poll() is None:
@@ -264,15 +398,39 @@ class PreviewRecorder:
             self.put_text(canvas, "Keep scene still", (x, 352), 0.55, (0, 200, 255), 2)
             self.draw_button(canvas, (x, 470, SCREEN_WIDTH - 18, 574), "RECORDING...",
                              (70, 70, 70), False)
-        elif self.record_finished:
+        elif self.record_finished and not self.lidar_validation_complete:
+            self.put_text(canvas, "CHECKING LIDAR", (x, 315), 0.68,
+                          (0, 200, 255), 2)
+            self.put_text(canvas, "Detecting 4 circles...", (x, 352), 0.48,
+                          (255, 255, 255), 1)
+            self.put_text(canvas, "Keep preview open", (x, 384), 0.48,
+                          (180, 180, 180), 1)
+            self.draw_button(canvas, (x, 470, SCREEN_WIDTH - 18, 574),
+                             "PLEASE WAIT", (70, 70, 70), False)
+        elif self.record_finished and self.lidar_validation_status == "passed":
             bag_path = os.path.join(self.scene_dir, "scene.bag")
             size_mb = os.path.getsize(bag_path) / (1024.0 * 1024.0)
-            self.put_text(canvas, "SAVED OK", (x, 315), 0.85, (80, 220, 90), 2)
-            self.put_text(canvas, "Bag: %.0f MB" % size_mb, (x, 352), 0.65,
+            self.put_text(canvas, "VALID DATA", (x, 315), 0.82, (80, 220, 90), 2)
+            self.put_text(canvas, "LiDAR circles  4 / 4", (x, 352), 0.53,
+                          (80, 220, 90), 2)
+            self.put_text(canvas, "Bag: %.0f MB" % size_mb, (x, 384), 0.55,
                           (255, 255, 255), 2)
-            self.put_text(canvas, "Preview stays live", (x, 384), 0.50, (180, 180, 180), 1)
             self.draw_button(canvas, (x, 470, SCREEN_WIDTH - 18, 574), "DONE / CLOSE",
                              (45, 145, 65), True)
+        elif self.record_finished and self.lidar_validation_status in ("failed", "error"):
+            count_text = (
+                "%d / 4" % self.lidar_center_count
+                if self.lidar_center_count is not None else "FAILED"
+            )
+            self.put_text(canvas, "INVALID DATA", (x, 315), 0.78, (0, 80, 255), 2)
+            self.put_text(canvas, "LiDAR circles  %s" % count_text, (x, 352), 0.53,
+                          (0, 140, 255), 2)
+            self.put_text(canvas, "Adjust angle, then retry", (x, 384), 0.45,
+                          (210, 210, 210), 1)
+            self.draw_button(canvas, (x, 410, SCREEN_WIDTH - 18, 494), "RETRY",
+                             (25, 125, 175), True)
+            self.draw_button(canvas, (x, 505, SCREEN_WIDTH - 18, 574), "CLOSE",
+                             (85, 85, 95), True)
         elif self.record_error:
             self.put_text(canvas, "RECORD FAILED", (x, 315), 0.72, (0, 70, 255), 2)
             self.put_text(canvas, self.record_error[:25], (x, 350), 0.42,
@@ -301,9 +459,41 @@ class PreviewRecorder:
         return recommended, can_record
 
     def on_mouse(self, event, mouse_x, mouse_y, _flags, _userdata):
-        if event != cv2.EVENT_LBUTTONUP or mouse_x < PANEL_X:
+        # Touchscreens do not always deliver a clean button-up event when the
+        # finger moves by a few pixels. Start actions on button-down instead;
+        # state changes below make the following synthetic/up event harmless.
+        if event != cv2.EVENT_LBUTTONDOWN or mouse_x < PANEL_X:
             return
-        if self.record_finished or self.record_error:
+        print(
+            "[FAST-Calib2 touch] x=%d y=%d recording=%s finished=%s "
+            "validation=%s markers=%d safe=%s brightness=%.1f"
+            % (
+                mouse_x,
+                mouse_y,
+                self.record_process is not None,
+                self.record_finished,
+                self.lidar_validation_status,
+                len(EXPECTED_MARKERS.intersection(self.detected_ids)),
+                self.safe_framing,
+                self.brightness,
+            ),
+            flush=True,
+        )
+        if (self.record_finished and self.lidar_validation_complete
+                and self.lidar_validation_status == "passed"):
+            if 470 <= mouse_y <= 590:
+                self.exit_requested = True
+            return
+        if (self.record_finished and self.lidar_validation_complete
+                and self.lidar_validation_status in ("failed", "error")):
+            if 410 <= mouse_y <= 500:
+                self.reset_after_failed_validation()
+            elif 505 <= mouse_y <= 590:
+                self.exit_requested = True
+            return
+        if self.record_finished:
+            return
+        if self.record_error:
             if 470 <= mouse_y <= 590:
                 self.exit_requested = True
             return
@@ -353,11 +543,15 @@ class PreviewRecorder:
             self.finish_recording()
             cv2.imshow(WINDOW_NAME, canvas)
             key = cv2.waitKey(20) & 0xFF
-            if key in (27, ord("q")) and self.record_process is None:
+            if (key in (27, ord("q")) and self.record_process is None
+                    and (not self.record_finished or self.lidar_validation_complete)):
                 self.exit_requested = True
         self.cancel_recording()
         cv2.destroyAllWindows()
-        return 0 if self.record_finished else (1 if self.record_error else 2)
+        if (self.record_finished and self.lidar_validation_complete
+                and self.lidar_validation_status == "passed"):
+            return 0
+        return 1 if self.record_error or self.record_finished else 2
 
 
 def parse_args():
@@ -369,6 +563,11 @@ def parse_args():
     parser.add_argument("--lidar-topic", default="/livox/lidar")
     parser.add_argument("--imu-topic", default="/livox/imu")
     parser.add_argument("--frame-info-topic", default="/hikrobot_camera/frame_info")
+    parser.add_argument(
+        "--lidar-validator-config",
+        default="/home/jr/fast_livo2_ws/src/FAST-Calib2/config/qr_params.yaml",
+    )
+    parser.add_argument("--lidar-validator-timeout", type=float, default=25.0)
     return parser.parse_args()
 
 
