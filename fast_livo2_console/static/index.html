@@ -69,7 +69,12 @@
                   <path d="M10 3v7H3M14 3v7h7M10 21v-7H3M14 21v-7h7"></path>
                 </svg>
               </button>
+              <div class="measure-actions" aria-label="点云测距">
+                <button id="toggleMeasure" aria-pressed="false">测距</button>
+                <button id="clearMeasure">清空</button>
+              </div>
               <div class="map-hud" id="mapHud">未连接</div>
+              <div class="measurement-hud" id="measurementHud" hidden></div>
               <div class="joystick joystick-left" id="moveStick" aria-label="移动摇杆">
                 <span></span>
               </div>

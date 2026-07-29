@@ -16,6 +16,7 @@ std::mutex g_mutex;
 std::condition_variable g_cv;
 std::atomic<bool> g_found{false};
 std::atomic<int> g_callbacks{0};
+std::atomic<int> g_failures{0};
 uint32_t g_handle = 0;
 
 void InfoChangeCallback(const uint32_t handle, const LivoxLidarInfo *info, void *) {
@@ -39,6 +40,15 @@ void ControlCallback(livox_status status, uint32_t handle,
   std::cout << name << " callback handle=" << handle
             << " status=" << status
             << " ret_code=" << ret_code << std::endl;
+  // Mid360 reports PARAM_NOTSUPPORT (0x20) for the legacy point-send key;
+  // its work mode controls point sampling instead. Keep issuing the command
+  // for compatibility with other SDK2 lidars, but do not fail Mid360 cleanup
+  // solely on that documented unsupported parameter.
+  const bool unsupported_point_send =
+      std::strcmp(name, "disable-point-send") == 0 && ret_code == 0x20;
+  if (static_cast<int>(status) != 0 || (ret_code != 0 && !unsupported_point_send)) {
+    ++g_failures;
+  }
   ++g_callbacks;
   g_cv.notify_all();
 }
@@ -62,8 +72,9 @@ int main(int argc, char **argv) {
   std::string config = argc > 2 ? argv[2] : "/home/jr/fast_livo2_ws/src/livox_ros_driver2/config/MID360_config.json";
   std::string host_ip = argc > 3 ? argv[3] : "192.168.1.5";
 
-  if (mode != "sleep" && mode != "idle" && mode != "normal" && mode != "disable-send") {
-    std::cerr << "usage: livox_power_control [sleep|idle|normal|disable-send] [config] [host_ip]" << std::endl;
+  if (mode != "sleep" && mode != "idle" && mode != "ready" &&
+      mode != "normal" && mode != "disable-send") {
+    std::cerr << "usage: livox_power_control [sleep|idle|ready|normal|disable-send] [config] [host_ip]" << std::endl;
     return 2;
   }
 
@@ -106,6 +117,16 @@ int main(int argc, char **argv) {
       std::cout << "set work mode idle" << std::endl;
       SetLivoxLidarWorkMode(handle, kLivoxLidarWakeUp, ControlCallback, const_cast<char *>("idle"));
       expected_callbacks += 1;
+    } else if (mode == "ready") {
+      // The installed SDK2 enum predates Mid360's READY value, but the Mid360
+      // protocol explicitly supports work_tgt_mode 0x09. Passing that value
+      // through the typed API keeps the scanner spun up with sampling disabled,
+      // so a following Normal command can start quickly.
+      std::cout << "set work mode ready" << std::endl;
+      SetLivoxLidarWorkMode(
+          handle, static_cast<LivoxLidarWorkMode>(0x09),
+          ControlCallback, const_cast<char *>("ready"));
+      expected_callbacks += 1;
     }
   }
 
@@ -113,6 +134,7 @@ int main(int argc, char **argv) {
   std::this_thread::sleep_for(std::chrono::milliseconds(300));
   LivoxLidarSdkUninit();
 
-  std::cout << "callbacks=" << g_callbacks.load() << "/" << expected_callbacks << std::endl;
-  return g_callbacks.load() > 0 ? 0 : 1;
+  std::cout << "callbacks=" << g_callbacks.load() << "/" << expected_callbacks
+            << " failures=" << g_failures.load() << std::endl;
+  return g_callbacks.load() >= expected_callbacks && g_failures.load() == 0 ? 0 : 1;
 }

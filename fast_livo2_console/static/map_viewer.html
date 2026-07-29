@@ -24,8 +24,6 @@
     #viewer { width: 100%; height: 100%; touch-action: none; }
     #viewer canvas { display: block; width: 100%; height: 100%; }
     .hud { position: absolute; left: 14px; top: 14px; max-width: min(900px, calc(100% - 28px)); padding: 8px 10px; border-radius: 8px; background: rgba(15,22,29,.78); color: #dbe7ef; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-line; pointer-events: none; }
-    .legend { position: absolute; left: 14px; bottom: 14px; padding: 8px 10px; border-radius: 8px; background: rgba(15,22,29,.72); color: #dbe7ef; font-size: 12px; line-height: 1.7; pointer-events: none; }
-    .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
     .tools { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
     .align { display: flex; align-items: center; gap: 6px; min-height: 40px; padding: 0 8px; border: 1px solid #cfd8e2; border-radius: 8px; background: #f8fafb; font-size: 13px; font-weight: 700; }
     .align input { width: 132px; accent-color: #087f8c; }
@@ -103,12 +101,6 @@
         <input id="replaySlider" type="range" min="0" max="1000" step="1" value="0">
         <span class="time" id="replayTime">0.0 / 0.0 s</span>
         <button id="replaySpeed" data-speed="1">1×</button>
-      </div>
-      <div class="legend">
-        <div><span style="background:#ef4444"></span>X / X0</div>
-        <div><span style="background:#22c55e"></span>Y / Y0</div>
-        <div><span style="background:#3b82f6"></span>Z / Z0</div>
-        <div><span style="background:#facc15"></span>扫描轨迹</div>
       </div>
     </section>
   </main>
@@ -560,7 +552,7 @@
           btn.textContent = `${f.name} · ${fmtSize(f.size)}`;
           btn.onclick = () => loadCloud(
             `/files/${encodeURIComponent(f.path).replaceAll("%2F", "/")}`,
-            f.name,
+            `${map.name}/${f.name}`,
             map.path,
             map.replay
           );
@@ -578,7 +570,7 @@
             if (sourcePoints.length || cloudLoadGeneration !== 0) return;
             loadCloud(
               `/files/${encodeURIComponent(first.path).replaceAll("%2F", "/")}`,
-              first.name,
+              `${map.name}/${first.name}`,
               map.path,
               map.replay
             );
@@ -878,10 +870,18 @@
       return sprite;
     }
 
-    function markerRadius() {
-      if (!bounds) return 0.08;
+    function measurementLabelOffset() {
+      if (!bounds) return 0.12;
       const span = Math.max(bounds.span.x, bounds.span.y, bounds.span.z);
-      return Math.max(0.045, Math.min(0.28, span * 0.012));
+      return Math.max(0.08, Math.min(0.5, span * 0.012));
+    }
+
+    function measurePointLabel(index) {
+      let label = "";
+      for (let value = index + 1; value > 0; value = Math.floor((value - 1) / 26)) {
+        label = String.fromCharCode(65 + ((value - 1) % 26)) + label;
+      }
+      return label;
     }
 
     function formatVec(v) {
@@ -890,20 +890,29 @@
 
     function measurementText() {
       if (!measurementMode && !measurePoints.length && !measurementMessage) return "";
-      const prefix = measurementMode ? "测距: 点击点云选择 A/B 两点" : "测距: 已关闭";
+      const prefix = measurementMode
+        ? `测距: 点击点云连续添加测点（已选 ${measurePoints.length} 点）`
+        : "测距: 已关闭";
       if (measurementMessage && !measurePoints.length) return `${prefix}\n${measurementMessage}`;
-      if (measurePoints.length === 1) return `${prefix}\nA ${formatVec(measurePoints[0])}，继续点击选择 B`;
+      if (measurePoints.length === 1) return `${prefix}\nA ${formatVec(measurePoints[0])}，继续点击添加 B`;
       if (measurePoints.length >= 2) {
-        const a = measurePoints[0];
-        const b = measurePoints[1];
-        const delta = b.clone().sub(a);
-        const distance = a.distanceTo(b);
+        let total = 0;
+        const segments = [];
+        for (let i = 1; i < measurePoints.length; i++) {
+          const distance = measurePoints[i - 1].distanceTo(measurePoints[i]);
+          total += distance;
+          segments.push(
+            `${measurePointLabel(i - 1)}→${measurePointLabel(i)} ${distance.toFixed(3)} m`
+          );
+        }
+        const last = measurePoints.length - 1;
+        const delta = measurePoints[last].clone().sub(measurePoints[last - 1]);
         return [
           prefix,
-          `距离 ${distance.toFixed(3)} m / ${(distance * 1000).toFixed(0)} mm`,
-          `ΔX ${delta.x.toFixed(3)} m · ΔY ${delta.y.toFixed(3)} m · ΔZ ${delta.z.toFixed(3)} m`,
-          `A ${formatVec(a)}`,
-          `B ${formatVec(b)}`,
+          `总长 ${total.toFixed(3)} m / ${(total * 1000).toFixed(0)} mm`,
+          `分段 ${segments.join(" · ")}`,
+          `末段 ΔX ${delta.x.toFixed(3)} m · ΔY ${delta.y.toFixed(3)} m · ΔZ ${delta.z.toFixed(3)} m`,
+          ...measurePoints.map((point, index) => `${measurePointLabel(index)} ${formatVec(point)}`),
         ].join("\n");
       }
       return prefix;
@@ -931,14 +940,23 @@
     }
 
     function addMeasureMarker(point, label, color) {
-      const radius = markerRadius();
-      const sphere = new THREE.Mesh(
-        new THREE.SphereGeometry(radius, 18, 12),
-        new THREE.MeshBasicMaterial({ color, depthTest: false })
+      const geometry = new THREE.BufferGeometry().setFromPoints([point]);
+      const marker = new THREE.Points(
+        geometry,
+        new THREE.PointsMaterial({
+          color,
+          size: 7,
+          sizeAttenuation: false,
+          depthTest: false,
+        })
       );
-      sphere.position.copy(point);
-      measureGroup.add(sphere);
-      measureGroup.add(makeLabel(label, point.clone().add(new THREE.Vector3(0, radius * 2.8, 0)), `#${color.toString(16).padStart(6, "0")}`));
+      marker.renderOrder = 11;
+      measureGroup.add(marker);
+      measureGroup.add(makeLabel(
+        label,
+        point.clone().add(new THREE.Vector3(0, measurementLabelOffset(), 0)),
+        `#${color.toString(16).padStart(6, "0")}`
+      ));
     }
 
     function redrawMeasurement() {
@@ -949,10 +967,15 @@
         child.material?.dispose?.();
         child.material?.map?.dispose?.();
       }
-      if (measurePoints[0]) addMeasureMarker(measurePoints[0], "A", 0x22c55e);
-      if (measurePoints[1]) {
-        addMeasureMarker(measurePoints[1], "B", 0xef4444);
-        const geometry = new THREE.BufferGeometry().setFromPoints([measurePoints[0], measurePoints[1]]);
+      measurePoints.forEach((point, index) => {
+        addMeasureMarker(
+          point,
+          measurePointLabel(index),
+          index === 0 ? 0x22c55e : 0xef4444
+        );
+      });
+      if (measurePoints.length >= 2) {
+        const geometry = new THREE.BufferGeometry().setFromPoints(measurePoints);
         const material = new THREE.LineBasicMaterial({ color: 0xfacc15, depthTest: false });
         const line = new THREE.Line(geometry, material);
         line.renderOrder = 10;
@@ -975,7 +998,6 @@
         updateHud();
         return true;
       }
-      if (measurePoints.length >= 2) clearMeasurement();
       measurePoints.push(hit.point.clone());
       measurementMessage = "";
       redrawMeasurement();

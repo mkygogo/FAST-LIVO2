@@ -1392,13 +1392,60 @@ body.record-mode .record-shell {
   left: 10px;
   top: 10px;
   z-index: 2;
-  max-width: calc(100% - 82px);
+  max-width: calc(100% - 230px);
   padding: 8px 10px;
   border-radius: 6px;
   background: rgba(15, 23, 42, .72);
   color: #e2e8f0;
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+
+.measurement-hud {
+  position: absolute;
+  left: 10px;
+  top: 76px;
+  z-index: 3;
+  max-width: min(620px, calc(100% - 20px));
+  padding: 8px 10px;
+  border: 1px solid rgba(250, 204, 21, .42);
+  border-radius: 6px;
+  background: rgba(15, 23, 42, .82);
+  color: #f8fafc;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
+.measurement-hud[hidden] {
+  display: none;
+}
+
+.measure-actions {
+  position: absolute;
+  right: 76px;
+  top: 12px;
+  z-index: 4;
+  display: flex;
+  gap: 6px;
+}
+
+.measure-actions button {
+  min-width: 64px;
+  min-height: 56px;
+  padding: 0 10px;
+  border-color: rgba(224, 234, 241, .72);
+  background: rgba(248, 250, 251, .94);
+  box-shadow: 0 10px 24px rgba(3, 10, 18, .22);
+  touch-action: manipulation;
+}
+
+.measure-actions button.active {
+  border-color: #0e9aa7;
+  background: #087f8c;
+  color: #fff;
 }
 
 .joystick {

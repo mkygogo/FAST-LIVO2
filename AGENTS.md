@@ -34,6 +34,7 @@ fast_livo2_console/
     launch_fast_lio_mid360.sh       Start FAST_LIO LiDAR-only mapping container
     stop_lidar_mapping.sh           Stop FAST_LIO mapping container
     livox_sleep.sh                  Put Mid360 into idle and disable point/IMU send
+    livox_ready.sh                  Keep Mid360 spun up briefly with sampling disabled
     livox_wake.sh                   Wake Mid360 for active scanning
     build_livox_power_control.sh    Build Livox SDK power-control helper
     start_fast_calib2_desktop.sh    Touch-friendly menu for deployed FAST-Calib2 workflow
@@ -213,11 +214,18 @@ Keep the UI model simple for the touch-screen operator:
   for rosbag/mapping/3DGS. The actual preview rate may be lower when exposure
   approaches the frame period. The 3D preview replaces each batch with the
   latest raw LiDAR frame instead of accumulating unregistered data.
-- Recording startup must verify real messages in order: start the Mid360 ROS
-  master/driver, confirm `/livox/lidar` and `/livox/imu`, start the camera,
-  confirm `/left_camera/image`, and only then launch `rosbag record`. A failed
-  readiness check must clean up the named device containers and must not leave a
-  video-only or otherwise partial bag behind.
+- Recording startup starts the Mid360 ROS master/driver first. Once that master
+  is reachable, camera initialization may overlap the Mid360 motor startup.
+  `/livox/lidar`, `/livox/imu`, and `/left_camera/image` must each deliver
+  multiple real messages before `rosbag record` is launched, and the console
+  must confirm that rosbag created its active file before reporting success. A
+  failed readiness check must clean up the named device containers and must not
+  leave a video-only or otherwise partial bag behind.
+- A normal recording stop may place the Mid360 in READY for a five-minute
+  quick-recapture window, with point/IMU sends disabled, then automatically
+  return it to IDLE. Abnormal cleanup, low-disk auto-stop, and **停止全部** must
+  go directly to IDLE. Never run the one-shot Livox power helper while a ROS
+  Mid360 driver is still connected.
 - New recordings are written directly under
   `fast_livo2_maps/<timestamp>/<timestamp>-gs-raw.bag` with a 1 GiB rosbag
   buffer. Warn below 30 GiB free, refuse to start below 15 GiB, and gracefully
@@ -522,6 +530,15 @@ Current behavior:
   - Left stick: move (forward follows look direction including pitch; strafe
     is level). Left/right strafe is not inverted.
   - Right stick: look (yaw + pitch).
+- The built-in Three.js viewer keeps **测距** and **清空** controls inside the
+  viewport so they remain reachable in fullscreen. Measurement mode interprets
+  a short canvas tap as a point pick while leaving both fullscreen joysticks
+  usable for movement and look. It supports an A/B/C... polyline, shows recent
+  segment lengths and total length, and converts displayed points back to ROS
+  map X/Y/Z for the coordinate readout. Turning measurement mode off pauses
+  picking without deleting results; only **清空** or clearing/replacing the
+  point cloud removes them. Markers and labels use fixed screen sizing so they
+  do not become large spheres in wide maps.
 - Block browser context menus / long-press "Save image" on the 3D viewport and
   joysticks (`contextmenu`, drag, user-select, touch-callout).
 - `/cloud_registered` batches are appended to a browser-side cumulative map
@@ -732,7 +749,14 @@ The offline map viewer (`map_viewer.html`) provides:
 - Manual 3-axis alignment (X/Y/Z rotation) to correct tilt in scanned maps
 - Alignment angle persisted in browser localStorage
 - Real-time FPS counter
-- Point sizing, Y mirror, point-to-point measurement, and optional scan replay
+- Point sizing, Y mirror, continuous multi-point polyline measurement, and
+  optional scan replay. Measurement markers are fixed-size screen points,
+  **清空测量** is the explicit reset, and the HUD reports per-segment distance,
+  total length, the latest XYZ delta, and labeled coordinates.
+- The HUD identifies a loaded map as `<scan-folder>/<pcd-or-ply-name>` so files
+  with common names such as `all_raw_points.pcd` remain distinguishable. Do not
+  restore the old lower-left axis/trajectory legend; the rendered axes already
+  communicate that information.
 - Roam mode: WASD movement, Q/E vertical, mouse-look with pointer lock
 
 Map loading must be race-safe. `loadMaps()` may schedule at most one default PCD,

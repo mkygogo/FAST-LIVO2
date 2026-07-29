@@ -14,6 +14,7 @@ import threading
 import time
 import urllib.parse
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 
 ROOT = pathlib.Path(__file__).resolve().parent
@@ -34,6 +35,7 @@ FASTLIVO_CONFIG_DIR = FASTLIVO_ROOT / "config"
 FASTLIVO_ACTIVE_SCAN = OUTPUT_DIR / "active_fast_livo2_scan.json"
 FASTLIVO_ACTIVE_RECORDING = OUTPUT_DIR / "active_fast_livo2_recording.json"
 FASTLIVO_OFFLINE_JOB = OUTPUT_DIR / "fast_livo2_offline_job.json"
+LIVOX_STANDBY_STATE = OUTPUT_DIR / "livox_standby.json"
 GS_SYNC_TARGET = os.environ.get("GS_LIVO_SYNC_TARGET", "jr@192.168.3.38:~/fast_livo2/gs_livo_datasets/")
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("FAST_LIVO2_CONSOLE_PORT", "8090"))
@@ -50,10 +52,15 @@ CONTAINERS = {
 }
 
 WORKFLOW_LOCK = threading.RLock()
+RECORD_START_LOCK = threading.Lock()
+RECORD_START_STATE = {}
+LIVOX_STANDBY_LOCK = threading.Lock()
+LIVOX_IDLE_TIMER = None
 GIB = 1024 ** 3
 RECORD_WARN_FREE = 30 * GIB
 RECORD_MIN_START_FREE = 15 * GIB
 RECORD_AUTO_STOP_FREE = 8 * GIB
+LIVOX_READY_GRACE_SECONDS = int(os.environ.get("LIVOX_READY_GRACE_SECONDS", "300"))
 
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -167,7 +174,152 @@ def run_livox_sleep():
     return {"ok": False, "output": "livox_sleep.sh not installed"}
 
 
+def run_livox_ready():
+    ready_script = DEPLOY_DIR / "livox_ready.sh"
+    if ready_script.exists():
+        return run_cmd([str(ready_script)], timeout=25, cwd=DEPLOY_DIR)
+    return {"ok": False, "output": "livox_ready.sh not installed"}
+
+
+def record_start_update(stage, message, **values):
+    with RECORD_START_LOCK:
+        if not RECORD_START_STATE.get("starting"):
+            return
+        RECORD_START_STATE.update({
+            "stage": stage,
+            "message": message,
+            "updated_epoch": time.time(),
+            **values,
+        })
+
+
+def record_start_begin():
+    with RECORD_START_LOCK:
+        RECORD_START_STATE.clear()
+        RECORD_START_STATE.update({
+            "starting": True,
+            "stage": "preflight",
+            "message": "正在检查相机、磁盘和运行状态",
+            "started_epoch": time.time(),
+            "updated_epoch": time.time(),
+            "timings": {},
+        })
+
+
+def record_start_finish():
+    with RECORD_START_LOCK:
+        RECORD_START_STATE.clear()
+
+
+def record_start_cancel_requested():
+    with RECORD_START_LOCK:
+        return bool(RECORD_START_STATE.get("cancel_requested"))
+
+
+def request_record_start_cancel():
+    with RECORD_START_LOCK:
+        if not RECORD_START_STATE.get("starting"):
+            return False
+        RECORD_START_STATE["cancel_requested"] = True
+        RECORD_START_STATE["message"] = "正在取消设备启动并安全回到待机"
+        return True
+
+
+def record_start_status():
+    with RECORD_START_LOCK:
+        if not RECORD_START_STATE:
+            return {}
+        state = dict(RECORD_START_STATE)
+        state["timings"] = dict(RECORD_START_STATE.get("timings") or {})
+    if state.get("starting"):
+        state["elapsed"] = round(max(0.0, time.time() - float(state.get("started_epoch") or time.time())), 1)
+    return state
+
+
+def record_start_timing(name, started):
+    with RECORD_START_LOCK:
+        if RECORD_START_STATE.get("starting"):
+            RECORD_START_STATE.setdefault("timings", {})[name] = round(time.monotonic() - started, 3)
+
+
+def livox_standby_status():
+    state = read_json_file(LIVOX_STANDBY_STATE)
+    if state.get("mode") != "ready":
+        return {"mode": "idle", "ready": False}
+    deadline = float(state.get("deadline_epoch") or 0)
+    remaining = max(0, round(deadline - time.time()))
+    return {
+        "mode": "ready",
+        "ready": remaining > 0,
+        "deadline_epoch": deadline,
+        "remaining_seconds": remaining,
+    }
+
+
+def clear_livox_standby_state():
+    try:
+        LIVOX_STANDBY_STATE.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def cancel_livox_idle_timer(clear_state=True):
+    global LIVOX_IDLE_TIMER
+    with LIVOX_STANDBY_LOCK:
+        timer = LIVOX_IDLE_TIMER
+        LIVOX_IDLE_TIMER = None
+        if timer:
+            timer.cancel()
+        if clear_state:
+            clear_livox_standby_state()
+
+
+def livox_idle_timer_fired():
+    global LIVOX_IDLE_TIMER
+    with LIVOX_STANDBY_LOCK:
+        LIVOX_IDLE_TIMER = None
+    state = livox_standby_status()
+    if state.get("mode") != "ready":
+        return
+    # A newly started workflow owns the final power state. Never run the SDK
+    # power helper while a ROS driver may be connected to the same Mid360.
+    if record_start_status().get("starting") or read_active_recording() or container_running(CONTAINERS["lidar"]):
+        clear_livox_standby_state()
+        return
+    run_livox_sleep()
+    clear_livox_standby_state()
+
+
+def schedule_livox_idle(delay=LIVOX_READY_GRACE_SECONDS):
+    global LIVOX_IDLE_TIMER
+    delay = max(1, int(delay))
+    deadline = time.time() + delay
+    atomic_write_json(LIVOX_STANDBY_STATE, {
+        "mode": "ready",
+        "deadline_epoch": deadline,
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    with LIVOX_STANDBY_LOCK:
+        if LIVOX_IDLE_TIMER:
+            LIVOX_IDLE_TIMER.cancel()
+        LIVOX_IDLE_TIMER = threading.Timer(delay, livox_idle_timer_fired)
+        LIVOX_IDLE_TIMER.daemon = True
+        LIVOX_IDLE_TIMER.start()
+
+
+def restore_livox_idle_timer():
+    state = read_json_file(LIVOX_STANDBY_STATE)
+    if state.get("mode") != "ready":
+        return
+    remaining = float(state.get("deadline_epoch") or 0) - time.time()
+    if remaining <= 0:
+        threading.Thread(target=livox_idle_timer_fired, daemon=True).start()
+    else:
+        schedule_livox_idle(remaining)
+
+
 def action_stop_scan_runtime():
+    cancel_livox_idle_timer()
     names = CONTAINERS["lidar"] + CONTAINERS["camera"] + CONTAINERS["lio"] + CONTAINERS["bag"] + CONTAINERS["gs_bag"] + CONTAINERS["offline_play"]
     stopped = docker_rm(names)
     sleep_res = run_livox_sleep()
@@ -176,6 +328,39 @@ def action_stop_scan_runtime():
         "ok": bool(stopped.get("ok") and sleep_res.get("ok")),
         "stop_processes": stopped,
         "sleep_lidar": sleep_res,
+        "output": output,
+    }
+
+
+def action_stop_record_runtime(keep_ready=False):
+    names = CONTAINERS["lidar"] + CONTAINERS["camera"] + CONTAINERS["lio"] + CONTAINERS["bag"] + CONTAINERS["gs_bag"] + CONTAINERS["offline_play"]
+    stopped = docker_rm(names)
+    cancel_livox_idle_timer()
+    if keep_ready:
+        power = run_livox_ready()
+        if power.get("ok"):
+            try:
+                schedule_livox_idle()
+                power["standby_seconds"] = LIVOX_READY_GRACE_SECONDS
+                power["mode"] = "ready"
+            except Exception as exc:
+                fallback = run_livox_sleep()
+                power["ok"] = False
+                power["standby_error"] = str(exc)
+                power["fallback_idle"] = fallback
+                power["mode"] = "idle"
+        else:
+            fallback = run_livox_sleep()
+            power["fallback_idle"] = fallback
+            power["mode"] = "idle"
+    else:
+        power = run_livox_sleep()
+        power["mode"] = "idle"
+    output = "\n".join(part for part in [stopped.get("output", ""), power.get("output", "")] if part)
+    return {
+        "ok": bool(stopped.get("ok") and power.get("ok")),
+        "stop_processes": stopped,
+        "lidar_power": power,
         "output": output,
     }
 
@@ -1101,6 +1286,7 @@ def api_status():
 
 
 def action_lidar_start():
+    cancel_livox_idle_timer()
     running = container_running(CONTAINERS["lidar"])
     if running:
         return {"ok": True, "message": "Mid360 driver already running", "running": running}
@@ -1516,7 +1702,23 @@ def prepare_scan_camera():
     return {"ok": bool(started.get("ok")), "stop": stopped, "start": started, "params": params}
 
 
-def wait_for_topic_message(container_name, topic, timeout=20):
+def wait_for_ros_master(container_name="mid360_driver", timeout=10):
+    deadline = time.time() + timeout
+    last = {"ok": False, "output": "等待 ROS master"}
+    while time.time() < deadline:
+        if container_name in docker_all_names():
+            last = run_cmd(
+                docker_exec_ros_cmd(container_name, "timeout 2 rosnode list >/dev/null"),
+                timeout=4,
+                cwd=DEPLOY_DIR,
+            )
+            if last.get("ok"):
+                return last
+        time.sleep(0.25)
+    return last
+
+
+def wait_for_topic_message(container_name, topic, timeout=20, message_count=1):
     deadline = time.time() + timeout
     while time.time() < deadline and container_name not in docker_all_names():
         time.sleep(0.5)
@@ -1525,7 +1727,10 @@ def wait_for_topic_message(container_name, topic, timeout=20):
     last = {"ok": False, "output": f"等待{topic}"}
     while time.time() < deadline:
         last = run_cmd(
-            docker_exec_ros_cmd(container_name, f"timeout 3 rostopic echo -n 1 {shlex.quote(topic)} >/dev/null"),
+            docker_exec_ros_cmd(
+                container_name,
+                f"timeout 4 rostopic echo -n {max(1, int(message_count))} {shlex.quote(topic)} >/dev/null",
+            ),
             timeout=5,
             cwd=DEPLOY_DIR,
         )
@@ -1536,22 +1741,24 @@ def wait_for_topic_message(container_name, topic, timeout=20):
 
 
 def wait_for_lidar_ready():
-    lidar = wait_for_topic_message("mid360_driver", "/livox/lidar", timeout=20)
-    imu = wait_for_topic_message("mid360_driver", "/livox/imu", timeout=10) if lidar.get("ok") else {"ok": False, "output": "等待雷达失败"}
+    lidar = wait_for_topic_message("mid360_driver", "/livox/lidar", timeout=22, message_count=3)
+    imu = wait_for_topic_message("mid360_driver", "/livox/imu", timeout=8, message_count=10) if lidar.get("ok") else {"ok": False, "output": "等待雷达失败"}
     return {"ok": bool(lidar.get("ok") and imu.get("ok")), "lidar": lidar, "imu": imu}
 
 
 def wait_for_camera_ready(retry=True):
-    image = wait_for_topic_message("mid360_driver", "/left_camera/image", timeout=25)
+    image = wait_for_topic_message("mid360_driver", "/left_camera/image", timeout=25, message_count=3)
     if image.get("ok") or not retry:
         return image
     if not container_running(CONTAINERS["camera"]):
         action_camera_start()
-        image = wait_for_topic_message("mid360_driver", "/left_camera/image", timeout=25)
+        image = wait_for_topic_message("mid360_driver", "/left_camera/image", timeout=25, message_count=3)
     return image
 
 
 def active_workflow():
+    if record_start_status().get("starting"):
+        return "recording_starting"
     offline = read_offline_job()
     if read_active_recording():
         return "recording"
@@ -1565,13 +1772,22 @@ def active_workflow():
 
 
 def record_runtime_status():
+    starting = record_start_status()
+    if starting.get("starting"):
+        return {
+            "active": False,
+            **starting,
+            "standby": livox_standby_status(),
+        }
     active = read_active_recording()
     if not active:
-        return {"active": False}
+        return {"active": False, "starting": False, "standby": livox_standby_status()}
     bag = pathlib.Path(active.get("bag", ""))
+    active_bag = pathlib.Path(str(bag) + ".active")
+    size_path = active_bag if active_bag.is_file() else bag
     started_epoch = float(active.get("started_epoch") or time.time())
     free = filesystem_free_bytes()
-    size = bag.stat().st_size if bag.is_file() else 0
+    size = size_path.stat().st_size if size_path.is_file() else 0
     elapsed = max(0.0, time.time() - started_epoch)
     byte_rate = size / elapsed if elapsed > 1 else 0
     return {
@@ -1583,6 +1799,30 @@ def record_runtime_status():
         "free_bytes": free,
         "warning": free < RECORD_WARN_FREE,
         "estimated_seconds_left": round(max(0, free - RECORD_AUTO_STOP_FREE) / byte_rate) if byte_rate > 0 else None,
+        "startup_timings": active.get("startup_timings") or {},
+        "standby": livox_standby_status(),
+    }
+
+
+def wait_for_rosbag_active(bag, timeout=8):
+    bag = pathlib.Path(bag)
+    active_bag = pathlib.Path(str(bag) + ".active")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if (
+            "fast_livo2_gs_raw_bag_record" in {row["name"] for row in docker_ps()}
+            and (active_bag.is_file() or bag.is_file())
+        ):
+            return {
+                "ok": True,
+                "active_bag": str(active_bag),
+                "container": "fast_livo2_gs_raw_bag_record",
+            }
+        time.sleep(0.2)
+    return {
+        "ok": False,
+        "output": f"rosbag未在{timeout}秒内创建活动文件",
+        "active_bag": str(active_bag),
     }
 
 
@@ -1605,59 +1845,133 @@ def action_fastlivo_record_start():
         mode = active_workflow()
         if mode != "idle":
             return {"ok": False, "message": f"当前正在执行 {mode}，不能开始录制"}
-        camera_usb = run_cmd(["lsusb", "-d", "2bdf:0001"], timeout=5)
-        if not camera_usb.get("ok") or "2bdf:0001" not in camera_usb.get("output", "").lower():
-            return {
-                "ok": False,
-                "message": "未检测到 Hikrobot 相机 USB，请重新插拔相机 USB 线或给相机重新上电后再录制",
-                "camera_usb_connected": False,
+        record_start_begin()
+        overall_started = time.monotonic()
+        scan_dir = None
+        try:
+            cancel_livox_idle_timer()
+            camera_usb = run_cmd(["lsusb", "-d", "2bdf:0001"], timeout=5)
+            if not camera_usb.get("ok") or "2bdf:0001" not in camera_usb.get("output", "").lower():
+                return {
+                    "ok": False,
+                    "message": "未检测到 Hikrobot 相机 USB，请重新插拔相机 USB 线或给相机重新上电后再录制",
+                    "camera_usb_connected": False,
+                }
+            free = filesystem_free_bytes()
+            if free < RECORD_MIN_START_FREE:
+                return {"ok": False, "message": f"磁盘可用空间不足15 GiB，当前 {free / GIB:.1f} GiB"}
+            ensure_dirs()
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            scan_dir = FASTLIVO_MAP_ROOT / stamp
+            scan_dir.mkdir(parents=True, exist_ok=False)
+            bag = scan_dir / f"{stamp}-gs-raw.bag"
+            update_scan_workflow(scan_dir, "recording", {
+                "status": "starting", "started_at": time.strftime("%Y-%m-%d %H:%M:%S"), "bag": str(bag),
+            })
+            record_start_update("reset", "正在清理旧设备进程")
+            action_lio_stop()
+            # The LiDAR container owns the shared ROS master. Once that master
+            # is reachable, camera initialization and Mid360 motor startup can
+            # safely overlap. The bag still starts only after all three topics
+            # have delivered multiple real messages.
+            device_reset = docker_rm(CONTAINERS["camera"] + CONTAINERS["lidar"])
+            record_start_update("lidar_start", "正在启动雷达驱动")
+            stage_started = time.monotonic()
+            lidar = action_lidar_start()
+            ros_master = wait_for_ros_master() if lidar.get("ok") else {"ok": False}
+            record_start_timing("ros_master_ready", stage_started)
+            if record_start_cancel_requested():
+                action_stop_scan_runtime()
+                update_scan_workflow(scan_dir, "recording", {"status": "invalid", "error": "操作员取消启动"})
+                return {"ok": False, "message": "录制启动已取消"}
+            if not lidar.get("ok") or not ros_master.get("ok"):
+                action_stop_scan_runtime()
+                update_scan_workflow(scan_dir, "recording", {"status": "invalid", "error": "雷达ROS主节点启动失败"})
+                return {"ok": False, "message": "雷达 ROS 主节点未能启动", "lidar": lidar, "ros_master": ros_master}
+
+            record_start_update("sensors", "雷达电机与相机正在并行预热")
+            sensors_started = time.monotonic()
+
+            def prepare_and_wait_camera():
+                camera_result = prepare_scan_camera()
+                record_start_timing("camera_process_started", sensors_started)
+                camera_ready_result = wait_for_camera_ready() if camera_result.get("ok") else {"ok": False}
+                record_start_timing("camera_ready", sensors_started)
+                return camera_result, camera_ready_result
+
+            def wait_and_time_lidar():
+                lidar_ready_result = wait_for_lidar_ready()
+                record_start_timing("lidar_imu_ready", sensors_started)
+                return lidar_ready_result
+
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="record-start") as pool:
+                lidar_future = pool.submit(wait_and_time_lidar)
+                camera_future = pool.submit(prepare_and_wait_camera)
+                lidar_ready = lidar_future.result()
+                camera, camera_ready = camera_future.result()
+            record_start_timing("all_sensors_ready", sensors_started)
+            if record_start_cancel_requested():
+                action_stop_scan_runtime()
+                update_scan_workflow(scan_dir, "recording", {"status": "invalid", "error": "操作员取消启动"})
+                return {"ok": False, "message": "录制启动已取消"}
+            if not lidar_ready.get("ok") or not camera.get("ok") or not camera_ready.get("ok"):
+                action_stop_scan_runtime()
+                update_scan_workflow(scan_dir, "recording", {"status": "invalid", "error": "相机或雷达启动失败"})
+                return {
+                    "ok": False,
+                    "message": "相机或雷达未能稳定出帧",
+                    "lidar": lidar,
+                    "ros_master": ros_master,
+                    "lidar_ready": lidar_ready,
+                    "camera": camera,
+                    "camera_ready": camera_ready,
+                }
+
+            record_start_update("rosbag", "三路数据已确认，正在创建无损 bag")
+            bag_started = time.monotonic()
+            inner = (
+                "rosbag record --lz4 --buffsize=1024 "
+                f"-O {shlex.quote(str(bag))} "
+                "/left_camera/image /livox/lidar /livox/imu"
+            )
+            cmd = named_ros_env_cmd("fast_livo2_gs_raw_bag_record", inner)
+            bag_res = start_process("record-data", cmd, cwd=DEPLOY_DIR)
+            bag_ready = wait_for_rosbag_active(bag)
+            record_start_timing("rosbag_ready", bag_started)
+            record_start_timing("total", overall_started)
+            if not bag_ready.get("ok"):
+                docker_sigint_wait("fast_livo2_gs_raw_bag_record", timeout=10)
+                action_stop_scan_runtime()
+                update_scan_workflow(scan_dir, "recording", {"status": "invalid", "error": "rosbag启动失败"})
+                return {"ok": False, "message": "三路数据正常，但 rosbag 未能创建文件", "bag": bag_res, "bag_ready": bag_ready}
+
+            startup_timings = record_start_status().get("timings") or {}
+            active = {
+                "scan_id": stamp, "scan_dir": str(scan_dir), "bag": str(bag),
+                "started_at": time.strftime("%Y-%m-%d %H:%M:%S"), "started_epoch": time.time(),
+                "log": bag_res.get("log"), "startup_timings": startup_timings,
             }
-        free = filesystem_free_bytes()
-        if free < RECORD_MIN_START_FREE:
-            return {"ok": False, "message": f"磁盘可用空间不足15 GiB，当前 {free / GIB:.1f} GiB"}
-        ensure_dirs()
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        scan_dir = FASTLIVO_MAP_ROOT / stamp
-        scan_dir.mkdir(parents=True, exist_ok=False)
-        bag = scan_dir / f"{stamp}-gs-raw.bag"
-        update_scan_workflow(scan_dir, "recording", {
-            "status": "starting", "started_at": time.strftime("%Y-%m-%d %H:%M:%S"), "bag": str(bag),
-        })
-        action_lio_stop()
-        # A camera/debug preview may currently own the shared ROS master.  If
-        # LiDAR joins that master and prepare_scan_camera() then restarts the
-        # camera, the LiDAR node remains alive but orphaned from the new master.
-        # Start both devices from a clean state so the LiDAR container owns the
-        # master for the entire recording.
-        device_reset = docker_rm(CONTAINERS["camera"] + CONTAINERS["lidar"])
-        lidar = action_lidar_start()
-        lidar_ready = wait_for_lidar_ready() if lidar.get("ok") else {"ok": False}
-        camera = prepare_scan_camera()
-        camera_ready = wait_for_camera_ready() if camera.get("ok") and lidar_ready.get("ok") else {"ok": False}
-        if not lidar.get("ok") or not lidar_ready.get("ok") or not camera.get("ok") or not camera_ready.get("ok"):
+            write_active_recording(active)
+            update_scan_workflow(scan_dir, "recording", {
+                "status": "recording",
+                "log": bag_res.get("log"),
+                "startup_timings": startup_timings,
+            })
+            threading.Thread(target=recording_watchdog, args=(stamp,), daemon=True).start()
+            return {
+                "ok": True, "scan_id": stamp, "scan_dir": str(scan_dir), "bag": str(bag),
+                "startup_timings": startup_timings,
+                "device_reset": device_reset, "lidar": lidar, "ros_master": ros_master,
+                "lidar_ready": lidar_ready, "camera": camera, "camera_ready": camera_ready,
+                "bag_ready": bag_ready,
+            }
+        except Exception as exc:
             action_stop_scan_runtime()
-            update_scan_workflow(scan_dir, "recording", {"status": "invalid", "error": "相机或雷达启动失败"})
-            return {"ok": False, "message": "相机或雷达未能稳定出帧", "lidar": lidar, "lidar_ready": lidar_ready, "camera": camera, "camera_ready": camera_ready}
-        inner = (
-            "rosbag record --lz4 --buffsize=1024 "
-            f"-O {shlex.quote(str(bag))} "
-            "/left_camera/image /livox/lidar /livox/imu"
-        )
-        cmd = named_ros_env_cmd("fast_livo2_gs_raw_bag_record", inner)
-        bag_res = start_process("record-data", cmd, cwd=DEPLOY_DIR)
-        active = {
-            "scan_id": stamp, "scan_dir": str(scan_dir), "bag": str(bag),
-            "started_at": time.strftime("%Y-%m-%d %H:%M:%S"), "started_epoch": time.time(),
-            "log": bag_res.get("log"),
-        }
-        write_active_recording(active)
-        update_scan_workflow(scan_dir, "recording", {"status": "recording", "log": bag_res.get("log")})
-        threading.Thread(target=recording_watchdog, args=(stamp,), daemon=True).start()
-        return {
-            "ok": True, "scan_id": stamp, "scan_dir": str(scan_dir), "bag": str(bag),
-            "device_reset": device_reset, "lidar": lidar, "lidar_ready": lidar_ready,
-            "camera": camera, "camera_ready": camera_ready,
-        }
+            if scan_dir:
+                update_scan_workflow(scan_dir, "recording", {"status": "invalid", "error": str(exc)})
+            return {"ok": False, "message": f"录制启动异常: {exc}"}
+        finally:
+            record_start_finish()
 
 
 def action_fastlivo_record_stop(reason="operator"):
@@ -1668,9 +1982,10 @@ def action_fastlivo_record_stop(reason="operator"):
         scan_dir = pathlib.Path(active["scan_dir"])
         update_scan_workflow(scan_dir, "recording", {"status": "stopping", "stop_reason": reason})
         stop_bag = docker_sigint_wait("fast_livo2_gs_raw_bag_record", timeout=45)
-        stop_devices = action_stop_scan_runtime()
         bag_info = inspect_rosbag(active["bag"])
         status = "valid" if stop_bag.get("ok") and bag_info.get("valid") else "invalid"
+        keep_ready = reason == "operator"
+        stop_devices = action_stop_record_runtime(keep_ready=keep_ready)
         update_scan_workflow(scan_dir, "recording", {
             "status": status,
             "stopped_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -2056,6 +2371,7 @@ def action_fastlivo_stop():
 
 
 def action_fastlivo_start_all():
+    cancel_livox_idle_timer()
     mode = active_workflow()
     if mode not in ("idle", "realtime_mapping"):
         return {"ok": False, "message": f"当前正在执行 {mode}，不能开始实时建图"}
@@ -2121,6 +2437,13 @@ def action_lio_start_all():
 
 def action_stop_all():
     mode = active_workflow()
+    if mode == "recording_starting":
+        requested = request_record_start_cancel()
+        return {
+            "ok": requested,
+            "cancel_recording_start": requested,
+            "output": "已请求取消录制启动；设备完成当前检测后会安全停止",
+        }
     if mode == "recording":
         stopped = action_fastlivo_record_stop(reason="stop_all")
         return {"ok": bool(stopped.get("ok")), "stop_recording": stopped, "output": stopped.get("message", "")}
@@ -2547,6 +2870,8 @@ async def handle_http(reader, writer):
             json_response(writer, list_fastlivo_scans())
         elif clean_path == "/api/fastlivo/offline/status" and method == "GET":
             json_response(writer, {"ok": True, "job": read_offline_job()})
+        elif clean_path == "/api/fastlivo/record/status" and method == "GET":
+            json_response(writer, {"ok": True, "recording": record_runtime_status()})
         elif clean_path.startswith("/api/fastlivo/maps/") and method == "GET":
             fastlivo_map_file_response(writer, clean_path)
         elif clean_path == "/api/gs/datasets" and method == "GET":
@@ -2589,9 +2914,9 @@ async def handle_http(reader, writer):
         elif method == "POST" and clean_path == "/api/fastlivo/start_all":
             json_response(writer, action_fastlivo_start_all())
         elif method == "POST" and clean_path == "/api/fastlivo/record/start":
-            json_response(writer, action_fastlivo_record_start())
+            json_response(writer, await asyncio.to_thread(action_fastlivo_record_start))
         elif method == "POST" and clean_path == "/api/fastlivo/record/stop":
-            json_response(writer, action_fastlivo_record_stop())
+            json_response(writer, await asyncio.to_thread(action_fastlivo_record_stop))
         elif method == "POST" and clean_path == "/api/fastlivo/offline/start":
             payload = parse_json_body() or {}
             json_response(writer, action_fastlivo_offline_start(str(payload.get("scan_id") or "")))
@@ -2607,7 +2932,7 @@ async def handle_http(reader, writer):
         elif method == "POST" and clean_path == "/api/lio/start_all":
             json_response(writer, action_lio_start_all())
         elif method == "POST" and clean_path == "/api/stop_all":
-            json_response(writer, action_stop_all())
+            json_response(writer, await asyncio.to_thread(action_stop_all))
         elif method == "POST" and clean_path == "/api/bag/start":
             json_response(writer, action_bag_start())
         elif method == "POST" and clean_path == "/api/bag/stop":
@@ -2626,6 +2951,7 @@ async def handle_http(reader, writer):
 
 async def main():
     ensure_dirs()
+    restore_livox_idle_timer()
     job = read_offline_job()
     if job.get("status") in ("starting", "running", "draining", "saving", "cancel_requested"):
         job.update({

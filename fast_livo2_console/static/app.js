@@ -2,6 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 let statusTimer = null;
 let recordClockTimer = null;
+let recordStartPollGeneration = 0;
 let pointWs = null;
 let cameraWs = null;
 let cameraReconnectTimer = null;
@@ -71,6 +72,13 @@ let fpsYaw = 0;
 let fpsPitch = 0;
 let dragging = false;
 let lastPointer = null;
+let pointerDown = null;
+let measurementMode = false;
+let measurementPoints = [];
+let measurementMessage = "";
+let measurementGroup = null;
+let measurementRaycaster = null;
+let measurementPointer = null;
 let renderFrames = 0;
 let renderFps = 0;
 let fpsStarted = performance.now();
@@ -265,6 +273,17 @@ function applyTiltCorrection(v) {
 
 function rosToThree(p) {
   return applyTiltCorrection(new THREE.Vector3(p[0], p[2], -p[1]));
+}
+
+function threeToRos(v) {
+  let x = v.x;
+  let y = v.y;
+  if (tiltCorrectionEnabled) {
+    const ca = Math.cos(tiltCorrectionRad);
+    const sa = Math.sin(tiltCorrectionRad);
+    [x, y] = [x * ca + y * sa, -x * sa + y * ca];
+  }
+  return [x, -v.z, y];
 }
 
 function headingToThreeDirection(yaw) {
@@ -902,7 +921,10 @@ async function refreshStatus() {
       $("finishScan").disabled = true;
     }
     const recording = data.recording || {};
-    if (recording.active) {
+    if (recording.starting) {
+      const elapsed = recording.elapsed == null ? "" : ` · ${Number(recording.elapsed).toFixed(1)} 秒`;
+      setRecordState("starting", `${recording.message || "设备启动中"}${elapsed}`);
+    } else if (recording.active) {
       setRecordState("recording", "正在无损录制");
       syncRecordElapsed(recording.elapsed);
       setText("recordSize", fmtSize(recording.size || 0));
@@ -912,7 +934,7 @@ async function refreshStatus() {
       $("recordHealth")?.classList.toggle("warning", Boolean(recording.warning));
       if (!cameraWs) ensureCameraStream("recording");
       if (!pointWs) ensurePointStream(recordRadarPreviewEnabled ? "lidar" : "health");
-    } else if (recordState === "recording") {
+    } else if (recordState === "recording" || recordState === "starting") {
       setRecordState("idle");
     } else {
       setRecordState(recordState);
@@ -951,6 +973,33 @@ async function refreshStatus() {
   } catch (err) {
     setText("serviceState", "离线");
   }
+}
+
+function stopRecordStartProgressPolling() {
+  recordStartPollGeneration += 1;
+}
+
+function startRecordStartProgressPolling() {
+  const generation = ++recordStartPollGeneration;
+  const poll = async () => {
+    if (generation !== recordStartPollGeneration || recordState !== "starting") return;
+    try {
+      const res = await fetch("/api/fastlivo/record/status", {cache: "no-store"});
+      const data = await res.json();
+      const recording = data.recording || {};
+      if (recording.starting) {
+        const elapsed = recording.elapsed == null ? "" : ` · ${Number(recording.elapsed).toFixed(1)} 秒`;
+        setRecordState("starting", `${recording.message || "设备启动中"}${elapsed}`);
+      }
+    } catch (_) {
+      // The main start request remains authoritative; a missed progress poll
+      // should not turn a healthy hardware startup into a UI error.
+    }
+    if (generation === recordStartPollGeneration && recordState === "starting") {
+      setTimeout(poll, 500);
+    }
+  };
+  poll();
 }
 
 async function loadLogs(target) {
@@ -1312,6 +1361,7 @@ async function startRecordWorkflow() {
   resetRecordSensorStatus();
   sceneMode = "live";
   setViewMode("free");
+  startRecordStartProgressPolling();
   try {
     const res = await fetch("/api/fastlivo/record/start", {method: "POST"});
     const data = await res.json();
@@ -1320,11 +1370,13 @@ async function startRecordWorkflow() {
     ensureCameraStream("recording");
     ensurePointStream("health");
     setRecordState("recording");
-    toast("无损数据录制已开始");
+    const total = data.startup_timings?.total;
+    toast(total == null ? "无损数据录制已开始" : `无损数据录制已开始 · 启动 ${Number(total).toFixed(1)} 秒`);
   } catch (err) {
     setRecordState("invalid", `启动失败: ${err.message}`);
     toast(`录制启动失败: ${err.message}`);
   } finally {
+    stopRecordStartProgressPolling();
     await refreshStatus();
   }
 }
@@ -1342,7 +1394,10 @@ async function stopRecordWorkflow() {
     setRecordState("valid");
     await refreshDataMaps();
     showTab("data");
-    toast("录制完成，数据校验通过；请选择离线建图");
+    const powerMode = data.stop_devices?.lidar_power?.mode;
+    toast(powerMode === "ready"
+      ? "录制完成；雷达保留 READY 5 分钟，可快速再次录制"
+      : "录制完成，数据校验通过；请选择离线建图");
   } catch (err) {
     closePointStream();
     closeCameraStream();
@@ -1530,6 +1585,11 @@ function initThree() {
   pathLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0xffcf5a, linewidth: 2 }));
   scene.add(pathLine);
 
+  measurementGroup = new THREE.Group();
+  scene.add(measurementGroup);
+  measurementRaycaster = new THREE.Raycaster();
+  measurementPointer = new THREE.Vector2();
+
   initThreePointer();
   initJoysticks();
   resizeThree();
@@ -1563,6 +1623,7 @@ function renderLoop(now) {
   }
   updateManualFps(dt);
   updateCameraPose();
+  updateMeasurementLabels();
   renderer.render(scene, camera);
   requestAnimationFrame(renderLoop);
 }
@@ -1663,6 +1724,7 @@ function trimPointBudget() {
 }
 
 function clearScene(showToast = true) {
+  clearMeasurement();
   for (const chunk of pointChunks) {
     scene?.remove(chunk.object);
     chunk.object.geometry.dispose();
@@ -1751,6 +1813,184 @@ function updateMapStats() {
     setText("recordMapMeta", `${formatCount(totalPoints)} 点`);
     setText("recordMapHud", `原始雷达最新帧 · ${renderFps} fps · 延迟 ${age}`);
   }
+}
+
+function measurementLabel(index) {
+  let label = "";
+  for (let value = index + 1; value > 0; value = Math.floor((value - 1) / 26)) {
+    label = String.fromCharCode(65 + ((value - 1) % 26)) + label;
+  }
+  return label;
+}
+
+function formatMeasurementPoint(point) {
+  const [x, y, z] = threeToRos(point);
+  return `(${x.toFixed(3)}, ${y.toFixed(3)}, ${z.toFixed(3)})`;
+}
+
+function updateMeasurementHud() {
+  const hud = $("measurementHud");
+  if (!hud) return;
+  const visible = measurementMode || measurementPoints.length > 0 || measurementMessage;
+  hud.hidden = !visible;
+  if (!visible) {
+    hud.textContent = "";
+    return;
+  }
+  const lines = [
+    measurementMode
+      ? `测距中 · 轻点点云连续添加测点（${measurementPoints.length} 点）`
+      : `测距已暂停 · 已选 ${measurementPoints.length} 点`,
+  ];
+  if (measurementMessage) lines.push(measurementMessage);
+  if (measurementPoints.length === 1) {
+    lines.push(`A ${formatMeasurementPoint(measurementPoints[0])} · 继续添加 B`);
+  } else if (measurementPoints.length >= 2) {
+    let total = 0;
+    const segments = [];
+    for (let i = 1; i < measurementPoints.length; i++) {
+      const distance = measurementPoints[i - 1].distanceTo(measurementPoints[i]);
+      total += distance;
+      segments.push(`${measurementLabel(i - 1)}→${measurementLabel(i)} ${distance.toFixed(3)}m`);
+    }
+    const shownSegments = segments.slice(-6);
+    lines.push(`总长 ${total.toFixed(3)} m / ${(total * 1000).toFixed(0)} mm`);
+    lines.push(`分段 ${segments.length > shownSegments.length ? "… · " : ""}${shownSegments.join(" · ")}`);
+    const last = measurementPoints.length - 1;
+    lines.push(`${measurementLabel(last)} ${formatMeasurementPoint(measurementPoints[last])}`);
+  }
+  hud.textContent = lines.join("\n");
+}
+
+function disposeMeasurementObject(object) {
+  const texture = object.material?.map;
+  object.geometry?.dispose?.();
+  object.material?.dispose?.();
+  texture?.dispose?.();
+}
+
+function clearMeasurement() {
+  measurementPoints = [];
+  measurementMessage = "";
+  if (measurementGroup) {
+    for (const child of [...measurementGroup.children]) {
+      measurementGroup.remove(child);
+      disposeMeasurementObject(child);
+    }
+  }
+  updateMeasurementHud();
+}
+
+function setMeasurementMode(enabled) {
+  measurementMode = Boolean(enabled);
+  measurementMessage = "";
+  const button = $("toggleMeasure");
+  button?.classList.toggle("active", measurementMode);
+  button?.setAttribute("aria-pressed", String(measurementMode));
+  if (button) button.textContent = measurementMode ? "测距中" : "测距";
+  updateMeasurementHud();
+}
+
+function makeMeasurementLabel(text, point, color) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 64;
+  canvas.height = 32;
+  const ctx = canvas.getContext("2d");
+  ctx.font = "700 22px sans-serif";
+  ctx.textAlign = "center";
+  ctx.strokeStyle = "rgba(15,23,42,.95)";
+  ctx.lineWidth = 5;
+  ctx.fillStyle = color;
+  ctx.strokeText(text, 32, 24);
+  ctx.fillText(text, 32, 24);
+  const texture = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthTest: false,
+  }));
+  sprite.position.copy(point);
+  sprite.center.set(0.5, -0.12);
+  sprite.renderOrder = 12;
+  sprite.userData.measurementLabel = true;
+  return sprite;
+}
+
+function redrawMeasurement() {
+  if (!measurementGroup) return;
+  for (const child of [...measurementGroup.children]) {
+    measurementGroup.remove(child);
+    disposeMeasurementObject(child);
+  }
+  measurementPoints.forEach((point, index) => {
+    const color = index === 0 ? 0x22c55e : 0xef4444;
+    const geometry = new THREE.BufferGeometry().setFromPoints([point]);
+    const marker = new THREE.Points(geometry, new THREE.PointsMaterial({
+      color,
+      size: 8,
+      sizeAttenuation: false,
+      depthTest: false,
+    }));
+    marker.renderOrder = 11;
+    measurementGroup.add(marker);
+    measurementGroup.add(makeMeasurementLabel(
+      measurementLabel(index),
+      point,
+      `#${color.toString(16).padStart(6, "0")}`
+    ));
+  });
+  if (measurementPoints.length >= 2) {
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(measurementPoints),
+      new THREE.LineBasicMaterial({ color: 0xfacc15, depthTest: false })
+    );
+    line.renderOrder = 10;
+    measurementGroup.add(line);
+  }
+  updateMeasurementHud();
+}
+
+function updateMeasurementLabels() {
+  if (!measurementGroup || !camera || !renderer) return;
+  const height = Math.max(1, renderer.domElement.clientHeight);
+  const fov = camera.fov * Math.PI / 180;
+  for (const child of measurementGroup.children) {
+    if (!child.userData.measurementLabel) continue;
+    const distance = Math.max(0.1, camera.position.distanceTo(child.position));
+    const worldPerPixel = 2 * distance * Math.tan(fov / 2) / height;
+    child.scale.set(38 * worldPerPixel, 19 * worldPerPixel, 1);
+  }
+}
+
+function pickMeasurementPoint(event) {
+  if (!measurementMode || !measurementRaycaster || !measurementPointer || !pointChunks.length) {
+    if (measurementMode && !pointChunks.length) {
+      measurementMessage = "当前没有可测量的点云";
+      updateMeasurementHud();
+    }
+    return;
+  }
+  const rect = renderer.domElement.getBoundingClientRect();
+  measurementPointer.x = ((event.clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1;
+  measurementPointer.y = -(((event.clientY - rect.top) / Math.max(1, rect.height)) * 2 - 1);
+  const distanceScale = viewMode === "fps" ? 12 : orbitDistance;
+  measurementRaycaster.params.Points.threshold = Math.max(
+    pointRenderSize() * 3,
+    Math.min(0.35, distanceScale * 0.004)
+  );
+  measurementRaycaster.setFromCamera(measurementPointer, camera);
+  const hit = measurementRaycaster.intersectObjects(
+    pointChunks.map((chunk) => chunk.object),
+    false
+  )[0];
+  if (!hit) {
+    measurementMessage = "未选中点，请靠近模型后再点";
+    updateMeasurementHud();
+    return;
+  }
+  measurementPoints.push(hit.point.clone());
+  measurementMessage = "";
+  redrawMeasurement();
 }
 
 function updatePointMaterials() {
@@ -1890,8 +2130,9 @@ function initThreePointer() {
   blockBrowserChrome(el);
   el.addEventListener("pointerdown", (event) => {
     event.preventDefault();
-    dragging = true;
+    dragging = !measurementMode;
     lastPointer = [event.clientX, event.clientY];
+    pointerDown = [event.clientX, event.clientY];
     el.setPointerCapture(event.pointerId);
   });
   el.addEventListener("pointermove", (event) => {
@@ -1914,13 +2155,23 @@ function initThreePointer() {
     updateFollowButton();
     updateMapStats();
   });
-  el.addEventListener("pointerup", () => {
+  el.addEventListener("pointerup", (event) => {
+    event.preventDefault();
+    if (
+      measurementMode
+      && pointerDown
+      && Math.hypot(event.clientX - pointerDown[0], event.clientY - pointerDown[1]) <= 12
+    ) {
+      pickMeasurementPoint(event);
+    }
     dragging = false;
     lastPointer = null;
+    pointerDown = null;
   });
   el.addEventListener("pointercancel", () => {
     dragging = false;
     lastPointer = null;
+    pointerDown = null;
   });
   el.addEventListener("wheel", (event) => {
     event.preventDefault();
@@ -2045,6 +2296,8 @@ function bindUi() {
   $("cancelOfflineMap")?.addEventListener("click", () => cancelOfflineMap());
   $("connectStreams").addEventListener("click", reconnectStreams);
   $("toggleFullscreen").addEventListener("click", toggleFullscreen);
+  $("toggleMeasure").addEventListener("click", () => setMeasurementMode(!measurementMode));
+  $("clearMeasure").addEventListener("click", clearMeasurement);
   $("gsListDatasets")?.addEventListener("click", listGsDatasets);
   $("gsSyncLatest")?.addEventListener("click", syncLatestGsDataset);
   $("refreshCameraConfig")?.addEventListener("click", () => refreshCameraConfig());
